@@ -6,8 +6,8 @@
 
 #include "textflag.h"
 
-// func dotProduct_sme(a, b unsafe.Pointer, n int64) float32
-TEXT ·dotProduct_sme(SB), NOSPLIT, $16-32
+// func dotProduct_sme_asm(a, b unsafe.Pointer, n int64) float32
+TEXT ·dotProduct_sme_asm(SB), NOSPLIT, $16-32
 	MOVD a+0(FP), R0       // R0 = a pointer
 	MOVD b+8(FP), R1       // R1 = b pointer
 	MOVD n+16(FP), R2      // R2 = n (count)

@@ -9,7 +9,6 @@ package simplego
 import (
 	"fmt"
 	"testing"
-	"unsafe"
 )
 
 // TestSMEDetection tests SME feature detection
@@ -31,7 +30,6 @@ func TestDotProductSME(t *testing.T) {
 	sizes := []int{8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192}
 
 	for _, size := range sizes {
-		fmt.Printf("\n=== Testing size %d ===\n", size)
 		a := make([]float32, size)
 		b := make([]float32, size)
 
@@ -45,22 +43,13 @@ func TestDotProductSME(t *testing.T) {
 			expected += a[i] * b[i]
 		}
 
-		fmt.Printf("a ptr: %p, b ptr: %p, size: %d\n", &a[0], &b[0], size)
-
-		result := dotProduct_sme(
-			unsafe.Pointer(&a[0]),
-			unsafe.Pointer(&b[0]),
-			int64(size))
-
-		fmt.Printf("Result: %f, expected: %f\n", result, expected)
+		result := dotProduct_sme(a, b, 0, 0, int64(size))
 
 		if result != expected {
 			t.Errorf("Size %d failed: got %f, expected %f", size, result, expected)
 			return
 		}
 	}
-
-	fmt.Printf("All sizes passed!\n")
 }
 
 // BenchmarkDotProductSME benchmarks the SME implementation
@@ -79,13 +68,10 @@ func BenchmarkDotProductSME(b *testing.B) {
 			c[i] = 2.0
 		}
 
-		b.Run(string(rune(size)), func(b *testing.B) {
+		b.Run(fmt.Sprintf("%d", size), func(b *testing.B) {
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
-				_ = dotProduct_sme(
-					unsafe.Pointer(&a[0]),
-					unsafe.Pointer(&c[0]),
-					int64(size))
+				_ = dotProduct_sme(a, c, 0, 0, int64(size))
 			}
 		})
 	}
@@ -103,7 +89,7 @@ func BenchmarkDotProductScalar(b *testing.B) {
 			c[i] = 2.0
 		}
 
-		b.Run(string(rune(size)), func(b *testing.B) {
+		b.Run(fmt.Sprintf("%d", size), func(b *testing.B) {
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
 				var sum float32

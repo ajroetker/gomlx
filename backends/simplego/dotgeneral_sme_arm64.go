@@ -6,13 +6,29 @@
 
 package simplego
 
-import "unsafe"
+import (
+	"runtime"
+	"unsafe"
+)
 
-// dotProduct_sme is implemented in dotgeneral_sme_arm64.s
+// dotProduct_sme_asm is implemented in dotgeneral_sme_arm64.s
 // It computes a single dot product of n float32 values using ARM SME.
 //
 //go:noescape
-func dotProduct_sme(a, b unsafe.Pointer, n int64) float32
+func dotProduct_sme_asm(a, b unsafe.Pointer, n int64) float32
+
+// dotProduct_sme computes dot product and keeps the source slices alive.
+// This prevents the compiler from optimizing away or relocating the slice backing arrays.
+func dotProduct_sme(aSlice, bSlice []float32, aIdx, bIdx int, n int64) float32 {
+	result := dotProduct_sme_asm(
+		unsafe.Pointer(&aSlice[aIdx]),
+		unsafe.Pointer(&bSlice[bIdx]),
+		n)
+	// Keep slices alive until after assembly completes
+	runtime.KeepAlive(aSlice)
+	runtime.KeepAlive(bSlice)
+	return result
+}
 
 // dotProductInnerLoopSME is a wrapper that uses SME to accelerate the inner dot product loop.
 // It processes the entire inner loop with SME for maximum performance.
@@ -34,37 +50,25 @@ func dotProductInnerLoopSME(lhsFlat, rhsFlat, outputFlat []float32,
 
 	// Compute sum0: dot(lhs, rhs[0])
 	if blockDim > 0 {
-		sum0 += dotProduct_sme(
-			unsafe.Pointer(&lhsFlat[lhsIdx]),
-			unsafe.Pointer(&rhsFlat[rhsIdx]),
-			int64(blockDim))
+		sum0 += dotProduct_sme(lhsFlat, rhsFlat, lhsIdx, rhsIdx, int64(blockDim))
 	}
 
 	// Compute sum1: dot(lhs, rhs[1])
 	rhsIdx1 := rhsIdx + blockDim
 	if blockDim > 0 {
-		sum1 += dotProduct_sme(
-			unsafe.Pointer(&lhsFlat[lhsIdx]),
-			unsafe.Pointer(&rhsFlat[rhsIdx1]),
-			int64(blockDim))
+		sum1 += dotProduct_sme(lhsFlat, rhsFlat, lhsIdx, rhsIdx1, int64(blockDim))
 	}
 
 	// Compute sum2: dot(lhs, rhs[2])
 	rhsIdx2 := rhsIdx + 2*blockDim
 	if blockDim > 0 {
-		sum2 += dotProduct_sme(
-			unsafe.Pointer(&lhsFlat[lhsIdx]),
-			unsafe.Pointer(&rhsFlat[rhsIdx2]),
-			int64(blockDim))
+		sum2 += dotProduct_sme(lhsFlat, rhsFlat, lhsIdx, rhsIdx2, int64(blockDim))
 	}
 
 	// Compute sum3: dot(lhs, rhs[3])
 	rhsIdx3 := rhsIdx + 3*blockDim
 	if blockDim > 0 {
-		sum3 += dotProduct_sme(
-			unsafe.Pointer(&lhsFlat[lhsIdx]),
-			unsafe.Pointer(&rhsFlat[rhsIdx3]),
-			int64(blockDim))
+		sum3 += dotProduct_sme(lhsFlat, rhsFlat, lhsIdx, rhsIdx3, int64(blockDim))
 	}
 
 	return
