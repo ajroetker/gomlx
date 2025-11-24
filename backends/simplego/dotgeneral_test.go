@@ -7,14 +7,15 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"github.com/gomlx/gomlx/pkg/core/graph"
-	"github.com/gomlx/gomlx/pkg/core/shapes"
-	"github.com/gomlx/gomlx/pkg/core/tensors"
-	"github.com/gomlx/gomlx/pkg/support/xslices"
 	"github.com/gomlx/gopjrt/dtypes"
 	"github.com/gomlx/gopjrt/dtypes/bfloat16"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/gomlx/gomlx/pkg/core/graph"
+	"github.com/gomlx/gomlx/pkg/core/shapes"
+	"github.com/gomlx/gomlx/pkg/core/tensors"
+	"github.com/gomlx/gomlx/pkg/support/xslices"
 )
 
 func TestDotGeneral_LargeShapesAndCopy(t *testing.T) {
@@ -397,7 +398,7 @@ func TestDotGeneral_Exec(t *testing.T) {
 				var numCalls atomic.Uint32
 				for runnerIdx := range 16 {
 					wg.Add(1)
-					go func(idx int) {
+					go func(_ int) {
 						defer wg.Done()
 						const numRepeats = 1000
 						for range numRepeats {
@@ -450,9 +451,7 @@ func TestDotGeneral_Exec(t *testing.T) {
 }
 
 func TestDotGeneral_Dot(t *testing.T) {
-	exec := graph.MustNewExec(backend, func(lhs, rhs *graph.Node) *graph.Node {
-		return graph.Dot(lhs, rhs)
-	})
+	exec := graph.MustNewExec(backend, graph.Dot)
 
 	y0 := exec.MustExec([]float32{1, 2, 3}, []float32{10, 11, 12})[0]
 	fmt.Printf("\ty0=%s\n", y0.GoStr())
