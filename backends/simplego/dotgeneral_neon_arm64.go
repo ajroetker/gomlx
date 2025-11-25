@@ -17,6 +17,13 @@ import (
 //go:noescape
 func dotProduct_neon_asm(a, b unsafe.Pointer, n int64) float32
 
+// dotProductGroup4_neon_asm is implemented in dotgeneral_neon_arm64.s
+// It computes 4 dot products simultaneously sharing the same LHS vector.
+// b_stride is the stride in elements (float32) between the start of each RHS vector.
+//
+//go:noescape
+func dotProductGroup4_neon_asm(a, b unsafe.Pointer, b_stride, n int64) (r0, r1, r2, r3 float32)
+
 // dotProduct_neon computes dot product using NEON and keeps the source slices alive.
 // This prevents the compiler from optimizing away or relocating the slice backing arrays.
 func dotProduct_neon(aSlice, bSlice []float32, aIdx, bIdx int, n int64) float32 {
@@ -45,13 +52,22 @@ func dotProductInnerLoopNEON(lhsFlat, rhsFlat, outputFlat []float32,
 	sum2 = outputFlat[outputIdx+2]
 	sum3 = outputFlat[outputIdx+3]
 
-	// Compute 4 independent dot products using NEON.
-	// NEON handles variable-length vectors efficiently, so we can process the entire blockDim.
-	// Note: blockDim >= 64 is guaranteed by the caller (see dotgeneral_large.go).
-	sum0 += dotProduct_neon(lhsFlat, rhsFlat, lhsIdx, rhsIdx, int64(blockDim))
-	sum1 += dotProduct_neon(lhsFlat, rhsFlat, lhsIdx, rhsIdx+blockDim, int64(blockDim))
-	sum2 += dotProduct_neon(lhsFlat, rhsFlat, lhsIdx, rhsIdx+2*blockDim, int64(blockDim))
-	sum3 += dotProduct_neon(lhsFlat, rhsFlat, lhsIdx, rhsIdx+3*blockDim, int64(blockDim))
+	// Compute 4 independent dot products using NEON Group4 optimization.
+	// This loads the LHS vector once and streams 4 RHS vectors against it.
+	// blockDim acts as the stride for RHS vectors because they are columns in the block.
+	r0, r1, r2, r3 := dotProductGroup4_neon_asm(
+		unsafe.Pointer(&lhsFlat[lhsIdx]),
+		unsafe.Pointer(&rhsFlat[rhsIdx]),
+		int64(blockDim), // stride in elements
+		int64(blockDim)) // length n
+
+	runtime.KeepAlive(lhsFlat)
+	runtime.KeepAlive(rhsFlat)
+
+	sum0 += r0
+	sum1 += r1
+	sum2 += r2
+	sum3 += r3
 
 	return
 }

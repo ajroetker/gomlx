@@ -17,6 +17,13 @@ import (
 //go:noescape
 func dotProduct_sme_asm(a, b unsafe.Pointer, n int64) float32
 
+// dotProductGroup4_sme_asm is implemented in dotgeneral_sme_arm64.s
+// It computes 4 dot products simultaneously sharing the same LHS vector using SME.
+// b_stride is the stride in elements (float32) between the start of each RHS vector.
+//
+//go:noescape
+func dotProductGroup4_sme_asm(a, b unsafe.Pointer, b_stride, n int64) (r0, r1, r2, r3 float32)
+
 // dotProduct_sme computes dot product and keeps the source slices alive.
 // This prevents the compiler from optimizing away or relocating the slice backing arrays.
 func dotProduct_sme(aSlice, bSlice []float32, aIdx, bIdx int, n int64) float32 {
@@ -45,13 +52,21 @@ func dotProductInnerLoopSME(lhsFlat, rhsFlat, outputFlat []float32,
 	sum2 = outputFlat[outputIdx+2]
 	sum3 = outputFlat[outputIdx+3]
 
-	// Compute 4 independent dot products using SME.
-	// SME handles variable-length vectors efficiently, so we can process the entire blockDim.
-	// Note: blockDim >= 2048 is guaranteed by the caller (see dotgeneral_large.go).
-	sum0 += dotProduct_sme(lhsFlat, rhsFlat, lhsIdx, rhsIdx, int64(blockDim))
-	sum1 += dotProduct_sme(lhsFlat, rhsFlat, lhsIdx, rhsIdx+blockDim, int64(blockDim))
-	sum2 += dotProduct_sme(lhsFlat, rhsFlat, lhsIdx, rhsIdx+2*blockDim, int64(blockDim))
-	sum3 += dotProduct_sme(lhsFlat, rhsFlat, lhsIdx, rhsIdx+3*blockDim, int64(blockDim))
+	// Compute 4 independent dot products using SME Group4 optimization.
+	// This significantly reduces smstart/smstop overhead (1x instead of 4x).
+	r0, r1, r2, r3 := dotProductGroup4_sme_asm(
+		unsafe.Pointer(&lhsFlat[lhsIdx]),
+		unsafe.Pointer(&rhsFlat[rhsIdx]),
+		int64(blockDim), // stride in elements
+		int64(blockDim)) // length n
+
+	runtime.KeepAlive(lhsFlat)
+	runtime.KeepAlive(rhsFlat)
+
+	sum0 += r0
+	sum1 += r1
+	sum2 += r2
+	sum3 += r3
 
 	return
 }

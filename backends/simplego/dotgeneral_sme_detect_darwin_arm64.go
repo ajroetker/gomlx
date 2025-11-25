@@ -21,9 +21,12 @@ func detectSME() bool {
 	smeDetectedOnce.Do(func() {
 		// Check for SME support via sysctl
 		// hw.optional.arm.FEAT_SME returns binary value: \x01 means available
+		// We check for both integer 1 (raw byte 0x01) and string "1" (ASCII 0x31) just in case.
 		hasSME, err := syscall.Sysctl("hw.optional.arm.FEAT_SME")
-		if err == nil && len(hasSME) > 0 && hasSME[0] == 1 {
-			smeDetected = true
+		if err == nil && len(hasSME) > 0 {
+			if hasSME[0] == 1 || hasSME[0] == '1' {
+				smeDetected = true
+			}
 		}
 	})
 	return smeDetected
