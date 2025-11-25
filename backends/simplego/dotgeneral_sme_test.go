@@ -12,11 +12,11 @@ import (
 )
 
 // TestSMEDetection tests SME feature detection
-func ZZZTestSMEDetection(t *testing.T) {
+func TestSMEDetection(t *testing.T) {
 	if hasSME {
-		t.Logf("✅ SME (Scalable Matrix Extension) detected - using 512-bit vectors")
+		t.Log("SME (Scalable Matrix Extension) detected - using 512-bit vectors")
 	} else {
-		t.Logf("❌ SME not available - using scalar fallback")
+		t.Log("SME not available - using scalar fallback")
 	}
 }
 

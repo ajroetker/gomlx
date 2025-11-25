@@ -45,31 +45,13 @@ func dotProductInnerLoopSME(lhsFlat, rhsFlat, outputFlat []float32,
 	sum2 = outputFlat[outputIdx+2]
 	sum3 = outputFlat[outputIdx+3]
 
-	// Compute 4 independent dot products using SME
-	// SME handles variable-length vectors efficiently, so we can process the entire blockDim
-
-	// Compute sum0: dot(lhs, rhs[0])
-	if blockDim > 0 {
-		sum0 += dotProduct_sme(lhsFlat, rhsFlat, lhsIdx, rhsIdx, int64(blockDim))
-	}
-
-	// Compute sum1: dot(lhs, rhs[1])
-	rhsIdx1 := rhsIdx + blockDim
-	if blockDim > 0 {
-		sum1 += dotProduct_sme(lhsFlat, rhsFlat, lhsIdx, rhsIdx1, int64(blockDim))
-	}
-
-	// Compute sum2: dot(lhs, rhs[2])
-	rhsIdx2 := rhsIdx + 2*blockDim
-	if blockDim > 0 {
-		sum2 += dotProduct_sme(lhsFlat, rhsFlat, lhsIdx, rhsIdx2, int64(blockDim))
-	}
-
-	// Compute sum3: dot(lhs, rhs[3])
-	rhsIdx3 := rhsIdx + 3*blockDim
-	if blockDim > 0 {
-		sum3 += dotProduct_sme(lhsFlat, rhsFlat, lhsIdx, rhsIdx3, int64(blockDim))
-	}
+	// Compute 4 independent dot products using SME.
+	// SME handles variable-length vectors efficiently, so we can process the entire blockDim.
+	// Note: blockDim >= 2048 is guaranteed by the caller (see dotgeneral_large.go).
+	sum0 += dotProduct_sme(lhsFlat, rhsFlat, lhsIdx, rhsIdx, int64(blockDim))
+	sum1 += dotProduct_sme(lhsFlat, rhsFlat, lhsIdx, rhsIdx+blockDim, int64(blockDim))
+	sum2 += dotProduct_sme(lhsFlat, rhsFlat, lhsIdx, rhsIdx+2*blockDim, int64(blockDim))
+	sum3 += dotProduct_sme(lhsFlat, rhsFlat, lhsIdx, rhsIdx+3*blockDim, int64(blockDim))
 
 	return
 }

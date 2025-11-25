@@ -516,13 +516,13 @@ func buildDotGeneralKernel[T PODNumericConstraints](lhs, rhs, output *Buffer, bl
 				lhsIdx := baseLhsIdx
 				var sum0, sum1, sum2, sum3 T
 
-				// Use SME (Apple M4+) SIMD acceleration for float32
-				// SME provides ~2.51x speedup over scalar for large vectors
-				// For other types or platforms, fall back to pure Go
-				// SME threshold: activate for vectors >= 64 elements
-				if hasSME && blockDim >= 64 {
-					// Type assert to []float32 for SME path
-					// This is safe because hasSME is only true for float32 on ARM64/Darwin
+				// SIMD acceleration for float32 on ARM64:
+				// - SME (Apple M4+): 512-bit vectors, best for large vectors (>= 2048)
+				// - NEON (all ARM64): 128-bit vectors, best for smaller vectors
+				// SME has streaming mode overhead, so NEON is faster for small/medium vectors.
+				// For other types or platforms, fall back to pure Go.
+				if hasSME && blockDim >= 2048 {
+					// SME path for large vectors (Apple M4+ only)
 					lhsFloat32 := any(lhsFlat).([]float32)
 					rhsFloat32 := any(rhsFlat).([]float32)
 					outputFloat32 := any(outputFlat).([]float32)
@@ -531,7 +531,20 @@ func buildDotGeneralKernel[T PODNumericConstraints](lhs, rhs, output *Buffer, bl
 						lhsFloat32, rhsFloat32, outputFloat32,
 						lhsIdx, rhsIdx, outputIdx, blockDim)
 
-					// Convert back to generic type T
+					sum0 = T(s0)
+					sum1 = T(s1)
+					sum2 = T(s2)
+					sum3 = T(s3)
+				} else if hasNEON && blockDim >= 64 {
+					// NEON path (all ARM64, and M4+ for vectors < 2048)
+					lhsFloat32 := any(lhsFlat).([]float32)
+					rhsFloat32 := any(rhsFlat).([]float32)
+					outputFloat32 := any(outputFlat).([]float32)
+
+					s0, s1, s2, s3 := dotProductInnerLoopNEON(
+						lhsFloat32, rhsFloat32, outputFloat32,
+						lhsIdx, rhsIdx, outputIdx, blockDim)
+
 					sum0 = T(s0)
 					sum1 = T(s1)
 					sum2 = T(s2)

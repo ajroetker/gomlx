@@ -6,10 +6,9 @@
 
 package simplego
 
-import "unsafe"
-
-// dotProduct_sme stub for non-ARM64 platforms
-func dotProduct_sme(a, b unsafe.Pointer, n int64) float32 {
+// dotProduct_sme stub for non-ARM64 platforms.
+// Signature matches dotgeneral_sme_arm64.go for consistency.
+func dotProduct_sme(aSlice, bSlice []float32, aIdx, bIdx int, n int64) float32 {
 	return 0
 }
 
