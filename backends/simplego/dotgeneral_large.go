@@ -30,7 +30,14 @@ var (
 )
 
 func init() {
-	for _, dtype := range []dtypes.DType{dtypes.F32, dtypes.F64, dtypes.BFloat16} {
+	// Initialize block dimensions for all numeric types that support DotGeneral.
+	// This includes float types and integer types (used by quantized models).
+	allNumericTypes := []dtypes.DType{
+		dtypes.F32, dtypes.F64, dtypes.BFloat16, dtypes.Float16,
+		dtypes.Int8, dtypes.Int16, dtypes.Int32, dtypes.Int64,
+		dtypes.Uint8, dtypes.Uint16, dtypes.Uint32, dtypes.Uint64,
+	}
+	for _, dtype := range allNumericTypes {
 		sizePerElem := dtype.Size()
 		if dtype == dtypes.BFloat16 || dtype == dtypes.Float16 {
 			// Because for BFloat16/Float16 we store the results in float32 and only later convert to
@@ -45,6 +52,10 @@ func init() {
 			log2Dim++
 		}
 		log2Dim--
+		// Ensure minimum block dimension of 8 (log2Dim >= 3) for the kernel's loop unrolling.
+		if log2Dim < 3 {
+			log2Dim = 3
+		}
 		DotGeneralTargetBlockLog2Dim[dtype] = log2Dim
 	}
 }
