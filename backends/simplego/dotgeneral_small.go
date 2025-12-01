@@ -163,10 +163,25 @@ func execDotGeneralSmall(backend *Backend, lhs, rhs *Buffer, params *dotGeneralN
 
 	tmpOutput := output
 	outputDType := output.shape.DType
-	needsTempOutput := dtype != outputDType
+
+	// Check if we need a temporary output buffer with a different accumulator dtype.
+	// This is needed for:
+	// - int8/uint8: input is int8 but accumulator is int32
+	// - float16/bfloat16: input is fp16 but accumulator is float32 for precision
+	needsTempOutput := false
+	var accumulatorDType dtypes.DType
+	if dtype == dtypes.Int8 || dtype == dtypes.Uint8 {
+		accumulatorDType = dtypes.Int32
+		needsTempOutput = dtype != outputDType // int8→int32 case
+	} else if dtype == dtypes.BFloat16 || dtype == dtypes.Float16 {
+		accumulatorDType = dtypes.Float32
+		needsTempOutput = true // Always need float32 temp for float16/bfloat16
+	}
+
 	if needsTempOutput {
 		// Create temporary output with intermediate dtype (float32 for fp16, int32 for int8)
-		tmpOutput = backend.getBufferForShape(output.shape)
+		tmpShape := shapes.Make(accumulatorDType, output.shape.Dimensions...)
+		tmpOutput = backend.getBufferForShape(tmpShape)
 		tmpOutput.Zeros()
 	}
 

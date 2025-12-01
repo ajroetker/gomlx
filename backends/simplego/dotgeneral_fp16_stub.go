@@ -1,0 +1,174 @@
+//go:build noasm || !arm64
+
+package simplego
+
+import (
+	"unsafe"
+
+	"github.com/gomlx/gopjrt/dtypes"
+	"github.com/gomlx/gopjrt/dtypes/bfloat16"
+	"github.com/x448/float16"
+)
+
+// Stub implementations for non-ARM64 or noasm builds
+
+func dotProductFP16_neon_asm(a, b unsafe.Pointer, n int64) float32 {
+	panic("dotProductFP16_neon_asm not available on this platform")
+}
+
+func dotProductFP16Group4_neon_asm(a, b unsafe.Pointer, b_stride, n int64) (r0, r1, r2, r3 float32) {
+	panic("dotProductFP16Group4_neon_asm not available on this platform")
+}
+
+func dotProductBF16_neon_asm(a, b unsafe.Pointer, n int64) float32 {
+	panic("dotProductBF16_neon_asm not available on this platform")
+}
+
+var hasFP16NEON = false
+var hasBF16NEON = false
+
+// execNormalizedDotGeneralFloat16ToFloat32 is the scalar fallback for FP16×FP16→FP32.
+func execNormalizedDotGeneralFloat16ToFloat32(lhs, rhs, output *Buffer, params *dotGeneralNodeData, batchStartIdx, batchEndIdx int) {
+	lhsFlat := lhs.flat.([]float16.Float16)
+	rhsFlat := rhs.flat.([]float16.Float16)
+	outputFlat := output.flat.([]float32)
+
+	contractingSize := params.contractingSize
+	lhsCrossSize := params.lhsCrossSize
+	rhsCrossSize := params.rhsCrossSize
+
+	lhsBatchStride := lhsCrossSize * contractingSize
+	rhsBatchStride := rhsCrossSize * contractingSize
+	outputBatchStride := lhsCrossSize * rhsCrossSize
+
+	const blockSize = 64
+
+	for batchIdx := batchStartIdx; batchIdx < batchEndIdx; batchIdx++ {
+		lhsBaseIdx := batchIdx * lhsBatchStride
+		rhsBaseIdx := batchIdx * rhsBatchStride
+		outputBaseIdx := batchIdx * outputBatchStride
+
+		for outerIdxLhsCross := 0; outerIdxLhsCross < lhsCrossSize; outerIdxLhsCross += blockSize {
+			lhsCrossBlockEnd := min(outerIdxLhsCross+blockSize, lhsCrossSize)
+
+			for outerIdxRhsCross := 0; outerIdxRhsCross < rhsCrossSize; outerIdxRhsCross += blockSize {
+				rhsCrossBlockEnd := min(outerIdxRhsCross+blockSize, rhsCrossSize)
+
+				for outerIdxContracting := 0; outerIdxContracting < contractingSize; outerIdxContracting += blockSize {
+					contractingBlockEnd := min(outerIdxContracting+blockSize, contractingSize)
+
+					for idxLhsCross := outerIdxLhsCross; idxLhsCross < lhsCrossBlockEnd; idxLhsCross++ {
+						lhsRowStartIdx := lhsBaseIdx + idxLhsCross*contractingSize
+						outputRowStartIdx := outputBaseIdx + idxLhsCross*rhsCrossSize
+
+						for idxRhsCross := outerIdxRhsCross; idxRhsCross < rhsCrossBlockEnd; idxRhsCross++ {
+							rhsColStartIdx := rhsBaseIdx + idxRhsCross*contractingSize
+							sum := outputFlat[outputRowStartIdx+idxRhsCross]
+
+							for idxContracting := outerIdxContracting; idxContracting < contractingBlockEnd; idxContracting++ {
+								lhsVal := lhsFlat[lhsRowStartIdx+idxContracting].Float32()
+								rhsVal := rhsFlat[rhsColStartIdx+idxContracting].Float32()
+								sum += lhsVal * rhsVal
+							}
+
+							outputFlat[outputRowStartIdx+idxRhsCross] = sum
+						}
+					}
+				}
+			}
+		}
+	}
+}
+
+// execNormalizedDotGeneralBFloat16ToFloat32 is the scalar fallback for BF16×BF16→FP32.
+func execNormalizedDotGeneralBFloat16ToFloat32(lhs, rhs, output *Buffer, params *dotGeneralNodeData, batchStartIdx, batchEndIdx int) {
+	lhsFlat := lhs.flat.([]bfloat16.BFloat16)
+	rhsFlat := rhs.flat.([]bfloat16.BFloat16)
+	outputFlat := output.flat.([]float32)
+
+	contractingSize := params.contractingSize
+	lhsCrossSize := params.lhsCrossSize
+	rhsCrossSize := params.rhsCrossSize
+
+	lhsBatchStride := lhsCrossSize * contractingSize
+	rhsBatchStride := rhsCrossSize * contractingSize
+	outputBatchStride := lhsCrossSize * rhsCrossSize
+
+	const blockSize = 64
+
+	for batchIdx := batchStartIdx; batchIdx < batchEndIdx; batchIdx++ {
+		lhsBaseIdx := batchIdx * lhsBatchStride
+		rhsBaseIdx := batchIdx * rhsBatchStride
+		outputBaseIdx := batchIdx * outputBatchStride
+
+		for outerIdxLhsCross := 0; outerIdxLhsCross < lhsCrossSize; outerIdxLhsCross += blockSize {
+			lhsCrossBlockEnd := min(outerIdxLhsCross+blockSize, lhsCrossSize)
+
+			for outerIdxRhsCross := 0; outerIdxRhsCross < rhsCrossSize; outerIdxRhsCross += blockSize {
+				rhsCrossBlockEnd := min(outerIdxRhsCross+blockSize, rhsCrossSize)
+
+				for outerIdxContracting := 0; outerIdxContracting < contractingSize; outerIdxContracting += blockSize {
+					contractingBlockEnd := min(outerIdxContracting+blockSize, contractingSize)
+
+					for idxLhsCross := outerIdxLhsCross; idxLhsCross < lhsCrossBlockEnd; idxLhsCross++ {
+						lhsRowStartIdx := lhsBaseIdx + idxLhsCross*contractingSize
+						outputRowStartIdx := outputBaseIdx + idxLhsCross*rhsCrossSize
+
+						for idxRhsCross := outerIdxRhsCross; idxRhsCross < rhsCrossBlockEnd; idxRhsCross++ {
+							rhsColStartIdx := rhsBaseIdx + idxRhsCross*contractingSize
+							sum := outputFlat[outputRowStartIdx+idxRhsCross]
+
+							for idxContracting := outerIdxContracting; idxContracting < contractingBlockEnd; idxContracting++ {
+								lhsVal := lhsFlat[lhsRowStartIdx+idxContracting].Float32()
+								rhsVal := rhsFlat[rhsColStartIdx+idxContracting].Float32()
+								sum += lhsVal * rhsVal
+							}
+
+							outputFlat[outputRowStartIdx+idxRhsCross] = sum
+						}
+					}
+				}
+			}
+		}
+	}
+}
+
+// buildDotGeneralKernelFloat16ToFloat32 returns a scalar kernel for FP16×FP16→FP32.
+func buildDotGeneralKernelFloat16ToFloat32(lhs, rhs, output *Buffer, blockDim int) kernelFuncType {
+	lhsFlat := lhs.flat.([]float16.Float16)
+	rhsFlat := rhs.flat.([]float16.Float16)
+	outputFlat := output.flat.([]float32)
+	blockSize := blockDim * blockDim
+
+	return func(lhsBlockIdx, rhsBlockIdx, outputBlockIdx int) {
+		baseLhsIdx := lhsBlockIdx * blockSize
+		baseRhsIdx := rhsBlockIdx * blockSize
+		outputIdx := outputBlockIdx * blockSize
+
+		for range blockDim {
+			rhsIdx := baseRhsIdx
+
+			for rhsRow := 0; rhsRow < blockDim; rhsRow++ {
+				lhsIdx := baseLhsIdx
+				sum := outputFlat[outputIdx]
+
+				for contractingIdx := 0; contractingIdx < blockDim; contractingIdx++ {
+					sum += lhsFlat[lhsIdx].Float32() * rhsFlat[rhsIdx].Float32()
+					lhsIdx++
+					rhsIdx++
+				}
+
+				outputFlat[outputIdx] = sum
+				outputIdx++
+			}
+
+			baseLhsIdx += blockDim
+		}
+	}
+}
+
+func init() {
+	// Register FP16 fallback kernels for non-NEON platforms
+	dotGeneralNormalizedDTypeMap.RegisterIfNotSet(dtypes.Float16, execNormalizedDotGeneralFloat16ToFloat32)
+	dotGeneralKernelDTypeMap.RegisterIfNotSet(dtypes.Float16, buildDotGeneralKernelFloat16ToFloat32)
+}
