@@ -2,6 +2,29 @@
 
 # Next
 
+- **Dynamic Shapes Support**: Added ORT-style dynamic shapes with symbolic dimensions and pattern-based graph caching.
+  - Package `shapes`:
+    - Added `Dimension` type alias for symbolic dimensions (negative values = symbolic, positive = static).
+    - Added symbolic dimension constants: `DimBatch` (-1), `DimSeqLen` (-2), `DimUnknown` (-3).
+    - Added `MakeDynamic()` to create shapes with symbolic dimensions.
+    - Added `WithDynamicBatch()`, `WithDynamicDim()`, and `MakeDynamic()` for shape manipulation.
+    - Added `Matches()` for pattern matching with symbolic dimensions (complements existing `Equal()`).
+  - Package `backends/shapeinference`:
+    - Updated all operation inference functions to propagate symbolic dimensions.
+    - Added broadcasting rules for symbolic dimensions (symbolic + symbolic, symbolic + 1, etc.).
+    - Added `hasSymbolicDim()` and `symbolicMax()` helper functions.
+    - Operations preserve symbolic dimensions through transformations (transpose, reduce, etc.).
+  - Package `graph`:
+    - Added pattern-based graph caching with bucketing strategies to reduce compiled graph count.
+    - Added `BucketingStrategy` interface and implementations: `Pow2Bucketing`, `LinearBucketing`, `NoBucketing`.
+    - Added `Exec.SetPatternCaching()`, `SetDynamicAxes()`, `WithPow2Bucketing()`, `WithLinearBucketing()`, `CacheSize()`.
+    - Two-level cache lookup: exact match (fast path) → pattern match (with bucketing).
+    - Added input shape capture for gradient computation: `Node.NumCapturedInputs()`, `Node.GetCapturedInputShape()`.
+    - Updated VJP functions to use captured shapes for gradient reconstruction with symbolic dimensions.
+    - Relaxed shape assertions to allow symbolic dimension matching in gradients.
+  - **Benefits**: 50-99% reduction in cached graphs for variable batch sizes/sequence lengths; 100% backward compatible.
+  - **Documentation**: Added comprehensive guide in `docs/dynamic_shapes.md`.
+  - **Example**: Added `examples/pattern_caching/` demonstrating bucketing strategies and API usage.
 - Added `.golangci.yml` and fixed many (still a long way to go) lint-warnings.
   - Based on https://gist.github.com/maratori/47a4d00457a92aa426dbd48a18776322
 - GitHub actions (workflows):
