@@ -1,8 +1,6 @@
 module github.com/gomlx/gomlx
 
-go 1.24.3
-
-toolchain go1.24.6
+go 1.26
 
 require (
 	github.com/MetalBlueberry/go-plotly v0.7.0
@@ -28,6 +26,7 @@ require (
 )
 
 require (
+	github.com/ajroetker/go-highway v0.0.0-20251227224823-9690fd224f81 // indirect
 	github.com/aymanbagabas/go-udiff v0.3.1 // indirect
 	github.com/charmbracelet/x/exp/golden v0.0.0-20241011142426-46044092ad91 // indirect
 )
