@@ -63,6 +63,7 @@ const (
 	NodeTypeGreaterThan
 	NodeTypeGreaterThanTotalOrder
 	NodeTypeIdentity
+	NodeTypeIf
 	NodeTypeImag
 	NodeTypeIota
 	NodeTypeIsFinite
@@ -2215,6 +2216,64 @@ func Identity(x *Node) (
 	}
 	g.registerNode(node)
 	return
+}
+
+// nodeInputsIf holds the inputs used for the call to backends.If.
+type nodeInputsIf struct {
+	predicate *Node
+	trueFn    any
+	falseFn   any
+}
+
+// Type implements the interface NodeInputs.
+func (ni *nodeInputsIf) Type() NodeType {
+	return NodeTypeIf
+}
+
+// String implements the interface NodeInputs.
+func (ni *nodeInputsIf) String() string {
+	return fmt.Sprintf("%s(predicate=[#%d], trueFn=%v, falseFn=%v)",
+		ni.Type(),
+		ni.predicate.Id(),
+		ni.trueFn,
+		ni.falseFn,
+	)
+}
+
+// If selects between two branches based on a scalar boolean predicate.
+// The predicate determines which branch to execute - trueFn if predicate is true,
+// falseFn if predicate is false.
+// Both trueFn and falseFn must be closure functions that are child functions of the current graph.
+// Both branches must return the same number of outputs with matching shapes.
+// predicate: A scalar boolean value that determines which branch to execute
+// trueFn: Function to execute when predicate is true (no inputs, one or more outputs)
+// falseFn: Function to execute when predicate is false (no inputs, same outputs as trueFn)
+// Returns: The outputs from whichever branch was executed
+//
+// The closures are NOT Go function types, but rather references to sub-computations.
+// They should be created using the backend-specific closure mechanism.
+func If(predicate *Node, trueFn any, falseFn any) []*Node {
+	inputNodes := []*Node{predicate}
+	g := validateBuildingGraphFromInputs(inputNodes...)
+	inputs := &nodeInputsIf{
+		predicate: predicate,
+		trueFn:    trueFn,
+		falseFn:   falseFn,
+	}
+	results, err := g.builder.If(predicate.outputOps[0], inputs.trueFn, inputs.falseFn)
+	if err != nil {
+		panic(err)
+	}
+	node := &Node{
+		outputOps: results,
+		outputShapes: xslices.Map(results,
+			func(op backends.Op) shapes.Shape { return mustNoError(g.builder.OpShape(op)) }),
+		graph:      g,
+		inputs:     inputs,
+		inputNodes: inputNodes,
+	}
+	g.registerNode(node)
+	return splitNode(node)
 }
 
 // nodeInputsImag holds the inputs used for the call to backends.Imag.

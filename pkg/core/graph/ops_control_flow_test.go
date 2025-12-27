@@ -58,7 +58,7 @@ func TestWhileCountTo10(t *testing.T) {
 		return results[0]
 	})
 
-	result := exec.Call()[0]
+	result := exec.MustExec()[0]
 	value := result.Value().(int32)
 	assert.Equal(t, int32(10), value, "Counter should reach 10")
 }
@@ -99,7 +99,7 @@ func TestWhileMultipleStates(t *testing.T) {
 		return results[1]
 	})
 
-	result := exec.Call()[0]
+	result := exec.MustExec()[0]
 	value := result.Value().(int32)
 	// sum = 1 + 2 + 3 + 4 + 5 = 15
 	assert.Equal(t, int32(15), value, "Sum should be 15")
@@ -121,7 +121,7 @@ func TestWhileTensorState(t *testing.T) {
 		condFn := fn.Closure()
 		condVec, _ := condFn.Input(xla.ShapeToXLA(vec.Shape()))
 		firstElem, _ := stablehlo.Slice(condVec, []int{0}, []int{1}, []int{1})
-		scalar, _ := stablehlo.Reshape(firstElem, stablehloshapes.Make(stablehlotypes.I32))
+		scalar, _ := stablehlo.Reshape(firstElem, stablehloshapes.Make(xla.DTypeToXLA(dtypes.Int32)))
 		limit, _ := condFn.ConstantFromScalar(int32(5))
 		cond, _ := stablehlo.Compare(scalar, limit, stablehlotypes.CompareLT, stablehlotypes.CompareSigned)
 		condFn.Return(cond)
@@ -137,7 +137,136 @@ func TestWhileTensorState(t *testing.T) {
 		return results[0]
 	})
 
-	result := exec.Call()[0]
+	result := exec.MustExec()[0]
 	value := result.Value().([]int32)
 	assert.Equal(t, []int32{5, 5, 5}, value, "Vector should be [5, 5, 5]")
+}
+
+// TestClosureGraphIf tests the If operation with closure-backed branches
+func TestClosureGraphIf(t *testing.T) {
+	backend, err := backends.New()
+	require.NoError(t, err)
+	require.NotNil(t, backend, "Backend required for If tests")
+
+	t.Run("simple conditional with closure - true", func(t *testing.T) {
+		result := MustExecOnce(backend, func(cond *Node) *Node {
+			g := cond.Graph()
+
+			// Create parent values
+			a := Scalar(g, dtypes.Float32, float32(5.0))
+			b := Scalar(g, dtypes.Float32, float32(3.0))
+
+			// Create closure graphs
+			thenG := g.NewClosureGraph("then")
+			elseG := g.NewClosureGraph("else")
+
+			if thenG == nil || elseG == nil {
+				t.Skip("Backend doesn't support closures")
+				return nil
+			}
+
+			// Import parent values into closures (StableHLO inherits parent scope)
+			thenA := thenG.UseParentValue(a)
+			thenB := thenG.UseParentValue(b)
+			elseA := elseG.UseParentValue(a)
+			elseB := elseG.UseParentValue(b)
+
+			// Build operations in closures
+			thenResult := Add(thenA, thenB)
+			elseResult := Sub(elseA, elseB)
+
+			// Compile closures
+			thenG.CompileClosure(thenResult)
+			elseG.CompileClosure(elseResult)
+
+			// Use IfClosure
+			return IfClosure(cond, thenG, elseG)[0]
+		}, true) // cond = true
+
+		// Should return 5+3 = 8
+		require.Equal(t, float32(8.0), result.Value().(float32))
+	})
+
+	t.Run("simple conditional with closure - false", func(t *testing.T) {
+		result := MustExecOnce(backend, func(cond *Node) *Node {
+			g := cond.Graph()
+
+			// Create parent values
+			a := Scalar(g, dtypes.Float32, float32(10.0))
+			b := Scalar(g, dtypes.Float32, float32(4.0))
+
+			// Create closure graphs
+			thenG := g.NewClosureGraph("then")
+			elseG := g.NewClosureGraph("else")
+
+			if thenG == nil || elseG == nil {
+				t.Skip("Backend doesn't support closures")
+				return nil
+			}
+
+			// Import parent values into closures
+			thenA := thenG.UseParentValue(a)
+			thenB := thenG.UseParentValue(b)
+			elseA := elseG.UseParentValue(a)
+			elseB := elseG.UseParentValue(b)
+
+			// Build operations in closures
+			thenResult := Add(thenA, thenB)
+			elseResult := Sub(elseA, elseB)
+
+			// Compile closures
+			thenG.CompileClosure(thenResult)
+			elseG.CompileClosure(elseResult)
+
+			// Use IfClosure
+			return IfClosure(cond, thenG, elseG)[0]
+		}, false) // cond = false
+
+		// Should return 10-4 = 6
+		require.Equal(t, float32(6.0), result.Value().(float32))
+	})
+
+	t.Run("multiple return values", func(t *testing.T) {
+		exec := MustNewExec(backend, func(cond *Node) []*Node {
+			g := cond.Graph()
+
+			// Create parent values
+			a := Scalar(g, dtypes.Float32, float32(5.0))
+			b := Scalar(g, dtypes.Float32, float32(3.0))
+
+			// Create closure graphs
+			thenG := g.NewClosureGraph("then")
+			elseG := g.NewClosureGraph("else")
+
+			if thenG == nil || elseG == nil {
+				t.Skip("Backend doesn't support closures")
+				return nil
+			}
+
+			// Import parent values into closures
+			thenA := thenG.UseParentValue(a)
+			thenB := thenG.UseParentValue(b)
+			elseA := elseG.UseParentValue(a)
+			elseB := elseG.UseParentValue(b)
+
+			// Build operations in closures - return two values
+			thenResult1 := Add(thenA, thenB)
+			thenResult2 := Mul(thenA, thenB)
+			elseResult1 := Sub(elseA, elseB)
+			elseResult2 := Div(elseA, elseB)
+
+			// Compile closures
+			thenG.CompileClosure(thenResult1, thenResult2)
+			elseG.CompileClosure(elseResult1, elseResult2)
+
+			// Use IfClosure
+			return IfClosure(cond, thenG, elseG)
+		})
+
+		results := exec.MustExec(true) // cond = true
+
+		// Should return (5+3=8, 5*3=15)
+		require.Equal(t, float32(8.0), results[0].Value().(float32))
+		require.Equal(t, float32(15.0), results[1].Value().(float32))
+	})
 }

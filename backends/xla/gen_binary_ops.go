@@ -250,3 +250,6 @@ func (b *Builder) Sub(lhs, rhs backends.Op) (backends.Op, error) {
 	}
 	return b.newNode(value), nil
 }
+
+// DynamicReshape is manually implemented in ops.go to avoid broadcasting
+// (which doesn't make sense for reshape operations)

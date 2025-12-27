@@ -656,4 +656,18 @@ type StandardOps interface {
 	// The closures are NOT Go function types, but rather references to sub-computations.
 	// They should be created using the backend-specific closure mechanism.
 	While(condFn, bodyFn any, initialStates ...Op) ([]Op, error)
+
+	// If selects between two branches based on a scalar boolean predicate.
+	// The predicate determines which branch to execute - trueFn if predicate is true,
+	// falseFn if predicate is false.
+	// Both trueFn and falseFn must be closure functions that are child functions of the current graph.
+	// Both branches must return the same number of outputs with matching shapes.
+	// predicate: A scalar boolean value that determines which branch to execute
+	// trueFn: Function to execute when predicate is true (no inputs, one or more outputs)
+	// falseFn: Function to execute when predicate is false (no inputs, same outputs as trueFn)
+	// Returns: The outputs from whichever branch was executed
+	//
+	// The closures are NOT Go function types, but rather references to sub-computations.
+	// They should be created using the backend-specific closure mechanism.
+	If(predicate Op, trueFn, falseFn any) ([]Op, error)
 }
