@@ -159,6 +159,9 @@ type Graph struct {
 	deviceMeshes     []*distributed.DeviceMesh
 	deviceAssignment []backends.DeviceNum
 	numDevices       int
+
+	// Closure support
+	parentGraph *Graph // Parent graph for closure graphs
 }
 
 // GraphId is globally unique.
@@ -826,4 +829,186 @@ func (g *Graph) getScalarConst(dtype dtypes.DType, value float64) (output *Node)
 	output = Const(g, shapes.CastAsDType(value, dtype))
 	dtypeMap[value] = output
 	return output
+}
+
+// NewClosureGraph creates a closure graph that inherits the parent scope.
+// This is used for conditional operations like If where branches need to access parent values.
+// Returns nil if the backend doesn't support closures (only XLA backend supports it).
+func (g *Graph) NewClosureGraph(name string) *Graph {
+	g.AssertBuilding()
+
+	// Check if backend is XLA (only XLA supports closures)
+	xlaBuilder, ok := g.builder.(interface {
+		NewClosureBuilder(name string) backends.Builder
+	})
+	if !ok {
+		// Backend doesn't support closures
+		return nil
+	}
+
+	// Create a closure builder
+	closureBuilder := xlaBuilder.NewClosureBuilder(name)
+	if closureBuilder == nil {
+		return nil
+	}
+
+	muGraphCount.Lock()
+	closureGraphId := graphCount
+	graphCount++
+	muGraphCount.Unlock()
+
+	return &Graph{
+		backend:               g.backend,
+		builder:               closureBuilder,
+		id:                    closureGraphId,
+		name:                  name,
+		parameterNameToHandle: make(map[string]ParameterHandle),
+		scalars:               make(scalarCache),
+		tensorConstants:       make(tensorConstCache),
+		aliasToNode:           make(map[string]*Node),
+		distStrategy:          distributed.None,
+		numDevices:            1,
+		parentGraph:           g, // Track parent for cross-graph references
+	}
+}
+
+// CompileClosure compiles the closure graph and returns outputs.
+// This should be called on a closure graph created with NewClosureGraph.
+// It returns the output nodes which can be passed to conditional operations.
+func (g *Graph) CompileClosure(outputs ...*Node) []*Node {
+	g.AssertValid()
+	g.AssertBuilding()
+
+	if len(outputs) == 0 {
+		exceptions.Panicf("no outputs selected when compiling closure graph %q", g.name)
+	}
+
+	// Sanity check on the output nodes
+	for ii, node := range outputs {
+		if node.NumOutputs() != 1 {
+			exceptions.Panicf("Graph(%q).CompileClosure cannot take multi-output nodes (output #%d: %s), "+
+				"this type of Node is internal only", g.name, ii, node)
+		}
+		if node == nil {
+			exceptions.Panicf("output node %d is nil when compiling closure graph %q", ii, g.name)
+		}
+		if node.Graph() != g && (g.parentGraph == nil || node.Graph() != g.parentGraph) {
+			exceptions.Panicf("output node %d is part of a different graph (name=%q) than the closure being "+
+				"compiled (name=%q) or its parent", ii, node.graph.name, g.name)
+		}
+	}
+
+	// For XLA backend, we need to call Return on the closure function
+	type closureReturner interface {
+		ClosureReturn(outputs ...backends.Op) error
+	}
+
+	if cr, ok := g.builder.(closureReturner); ok {
+		// Extract backend ops from nodes
+		outputOps := make([]backends.Op, len(outputs))
+		for i, node := range outputs {
+			outputOps[i] = node.outputOps[0]
+		}
+
+		// Call Return on the closure function
+		if err := cr.ClosureReturn(outputOps...); err != nil {
+			panic(errors.WithMessagef(err, "failed to return from closure function %q", g.name))
+		}
+	}
+
+	return outputs
+}
+
+// UseParentValue creates a reference to a parent graph value in this closure graph.
+// This allows closure graphs to use values computed in the parent graph.
+// The returned node belongs to the closure graph but uses the parent value's backend operation.
+//
+// StableHLO If branches inherit parent scope implicitly, so the underlying backend
+// operation is already in scope. This method creates a graph-level wrapper.
+//
+// Example:
+//
+//	closureG := g.NewClosureGraph("branch")
+//	parentVal := Scalar(g, dtypes.Float32, 5.0)
+//	valInClosure := closureG.UseParentValue(parentVal)  // Reference in closure
+//	result := Add(valInClosure, Scalar(closureG, dtypes.Float32, 1.0))
+//	closureG.CompileClosure(result)
+func (g *Graph) UseParentValue(parentNode *Node) *Node {
+	g.AssertValid()
+	g.AssertBuilding()
+
+	if g.parentGraph == nil {
+		exceptions.Panicf("UseParentValue can only be called on closure graphs (graph %q has no parent)", g.name)
+	}
+
+	if parentNode == nil {
+		exceptions.Panicf("UseParentValue: parentNode is nil")
+	}
+
+	parentNode.AssertValid()
+	if parentNode.Graph() != g.parentGraph {
+		exceptions.Panicf("UseParentValue: node %q belongs to graph %q, not the parent graph %q",
+			parentNode.String(), parentNode.Graph().Name(), g.parentGraph.Name())
+	}
+
+	if parentNode.NumOutputs() != 1 {
+		exceptions.Panicf("UseParentValue: node %q has %d outputs, expected 1",
+			parentNode.String(), parentNode.NumOutputs())
+	}
+
+	// Create a reference node in this closure graph that uses the parent's backend operation.
+	// At the StableHLO level, the parent value is already in scope for the closure.
+	return g.newReferenceNode(parentNode)
+}
+
+// nodeInputsReference holds the inputs for a reference node that uses
+// a parent graph's value in a closure graph.
+type nodeInputsReference struct {
+	sourceNode *Node // The node from the parent graph
+}
+
+// Type implements the interface NodeInputs.
+// Uses NodeTypeInvalid since reference nodes are internal-only.
+func (ni *nodeInputsReference) Type() NodeType {
+	return NodeTypeInvalid
+}
+
+// String implements the interface NodeInputs.
+func (ni *nodeInputsReference) String() string {
+	return fmt.Sprintf("Reference(from=[#%d])", ni.sourceNode.Id())
+}
+
+// newReferenceNode creates a node in this graph that references an operation from another graph.
+// This is used for closure graphs to reference parent values.
+func (g *Graph) newReferenceNode(sourceNode *Node) *Node {
+	// Try to use the builder's UseParentValue method to create a proper reference
+	type parentValueUser interface {
+		UseParentValue(parentOp backends.Op) (backends.Op, error)
+	}
+
+	var outputOps []backends.Op
+	if pvu, ok := g.builder.(parentValueUser); ok {
+		// Use the builder's method to create proper references in the closure
+		outputOps = make([]backends.Op, len(sourceNode.outputOps))
+		for i, parentOp := range sourceNode.outputOps {
+			closureOp, err := pvu.UseParentValue(parentOp)
+			if err != nil {
+				panic(errors.WithMessagef(err, "failed to create parent value reference for %s", sourceNode.String()))
+			}
+			outputOps[i] = closureOp
+		}
+	} else {
+		// Fallback: use same backend operations (for non-XLA backends)
+		outputOps = sourceNode.outputOps
+	}
+
+	node := &Node{
+		graph:        g,
+		id:           NodeId(len(g.nodes)),
+		outputShapes: []shapes.Shape{sourceNode.Shape()},
+		outputOps:    outputOps,
+		inputs:       &nodeInputsReference{sourceNode: sourceNode},
+	}
+	g.nodes = append(g.nodes, node)
+	return node
 }

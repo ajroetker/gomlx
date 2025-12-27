@@ -127,6 +127,7 @@ const (
 
 	// Control flow operations
 	OpTypeWhile
+	OpTypeIf
 
 	// OpTypeLast should always be kept the last, it is used as a counter/marker for OpType.
 	OpTypeLast

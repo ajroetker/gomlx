@@ -39,6 +39,11 @@ type Builder struct {
 	cacheReductions map[reductionKey]*stablehlo.Function
 	cacheArgMinMax  map[argMinMaxKey]*stablehlo.Function
 	cacheSelections map[reductionKey]*stablehlo.Function
+
+	// Closure support
+	parentBuilder    *Builder             // Link to parent builder (nil for main)
+	activeFn         *stablehlo.Function  // Function being built into (main or closure)
+	isClosureBuilder bool                 // Whether this is a closure builder
 }
 
 // reductionKey for the cache of inlined functions for reductions.
@@ -85,6 +90,11 @@ type Node struct {
 	builder *Builder
 }
 
+// Value returns the underlying stablehlo.Value for advanced use cases.
+func (n *Node) Value() *stablehlo.Value {
+	return n.value
+}
+
 // CheckValid returns an error if the backend or the builder are not ok.
 //
 // E.g.: they have been finalized or the builder has already been compiled.
@@ -97,6 +107,7 @@ func (b *Builder) CheckValid() error {
 
 // verifyAndCastValues sanity checks that the values (backends.Op) are valid and created with this builder.
 // It returns the underlying *Node of the values.
+// For closure builders, it allows values from the parent builder (cross-graph references).
 func (b *Builder) verifyAndCastValues(name string, values ...backends.Op) ([]*Node, error) {
 	if err := b.CheckValid(); err != nil {
 		return nil, err
@@ -112,11 +123,17 @@ func (b *Builder) verifyAndCastValues(name string, values ...backends.Op) ([]*No
 				"nil or invalid Op (%T: %v) given as an input to %q, it must be an input created by the same "+
 					"backend builder (%s:%s)", input, input, name, b.backend.Name(), b.name)
 		}
+		// Allow cross-graph references for closures
 		if node.builder != b {
-			return nil, errors.Errorf(
-				"input given to parameter #%d (%q) was created with a different builder (%s) than the builder"+
-					" (%s) it is being used in -- Ops cannot cross to different builders",
-				i, name, node.builder.Name(), b.Name())
+			// Check if this is a closure and the node is from the parent
+			if b.isClosureBuilder && node.builder == b.parentBuilder {
+				// Valid cross-graph reference - closure can use parent values
+			} else {
+				return nil, errors.Errorf(
+					"input given to parameter #%d (%q) was created with a different builder (%s) than the builder"+
+						" (%s) it is being used in -- Ops cannot cross to different builders",
+					i, name, node.builder.Name(), b.Name())
+			}
 		}
 		nodes[i] = node
 	}
@@ -143,6 +160,12 @@ func (b *Builder) newNode(value *stablehlo.Value) *Node {
 	}
 }
 
+// NewNode creates a new Node from a stablehlo.Value for advanced use cases.
+// This is used when working directly with StableHLO operations like If.
+func (b *Builder) NewNode(value *stablehlo.Value) *Node {
+	return b.newNode(value)
+}
+
 func (b *Builder) Parameter(name string, shape shapes.Shape, sharding *backends.ShardingSpec) (
 	backends.Op, error) {
 	if err := b.CheckValid(); err != nil {
@@ -167,7 +190,8 @@ func (b *Builder) Parameter(name string, shape shapes.Shape, sharding *backends.
 			return nil, errors.WithMessagef(err, "while creating sharding spec for parameter %q", name)
 		}
 	}
-	value, err := b.fn.NamedInputWithSharding(name, ShapeToXLA(shape), shardySpec)
+	fn := b.getActiveFn()
+	value, err := fn.NamedInputWithSharding(name, ShapeToXLA(shape), shardySpec)
 	if err != nil {
 		return nil, errors.WithMessagef(err, "while building parameter %q", name)
 	}
@@ -190,7 +214,8 @@ func (b *Builder) Constant(flat any, dimensions ...int) (backends.Op, error) {
 	if bf16Slice, ok := flat.([]bfloat16.BFloat16); ok {
 		flat = any(BFloat16SliceToXLA(bf16Slice))
 	}
-	value, err := b.fn.ConstantFromFlatAndDimensions(flat, dimensions...)
+	fn := b.getActiveFn()
+	value, err := fn.ConstantFromFlatAndDimensions(flat, dimensions...)
 	if err != nil {
 		return nil, errors.WithMessagef(err, "while building op Constant()")
 	}
@@ -258,6 +283,110 @@ func (b *Builder) meshByName(meshName string) (*shardy.DeviceMesh, error) {
 // StableHLOFunction returns the underlying stablehlo.Function for advanced use cases.
 // This allows direct access to StableHLO features like While loops.
 func (b *Builder) StableHLOFunction() *stablehlo.Function {
+	return b.fn
+}
+
+// NewClosureBuilder creates a new builder for building a closure function.
+// The closure inherits the parent scope and can reference values from the parent.
+// This is used for conditional operations like If.
+func (b *Builder) NewClosureBuilder(name string) backends.Builder {
+	if err := b.CheckValid(); err != nil {
+		return nil
+	}
+
+	// Get or create the active function
+	activeFn := b.activeFn
+	if activeFn == nil {
+		activeFn = b.fn
+	}
+
+	// Create a closure of the active function
+	closure := activeFn.Closure()
+
+	return &Builder{
+		name:             name,
+		backend:          b.backend,
+		parentBuilder:    b,
+		builder:          b.builder,          // Share the same StableHLO builder
+		fn:               b.fn,               // Keep reference to main function
+		activeFn:         closure,            // Build into closure
+		isClosureBuilder: true,
+		// Inherit caches from parent
+		cacheReductions: b.cacheReductions,
+		cacheArgMinMax:  b.cacheArgMinMax,
+		cacheSelections: b.cacheSelections,
+	}
+}
+
+// ClosureFunction returns the closure function if this is a closure builder.
+// Returns nil if this is not a closure builder.
+func (b *Builder) ClosureFunction() *stablehlo.Function {
+	if b.isClosureBuilder {
+		return b.activeFn
+	}
+	return nil
+}
+
+// UseParentValue creates a reference to a parent builder's value that can be used in this closure.
+// This is used for If branches that need to reference values from the parent scope.
+// Returns an error if this is not a closure builder or the parentOp doesn't belong to the parent.
+func (b *Builder) UseParentValue(parentOp backends.Op) (backends.Op, error) {
+	if !b.isClosureBuilder {
+		return nil, errors.New("UseParentValue can only be called on closure builders")
+	}
+	if b.parentBuilder == nil {
+		return nil, errors.New("closure builder has no parent")
+	}
+
+	parentNode, ok := parentOp.(*Node)
+	if !ok {
+		return nil, errors.Errorf("expected *Node, got %T", parentOp)
+	}
+
+	// Use stablehlo's UseParentValue to create a reference in the closure
+	closureValue, err := b.activeFn.UseParentValue(parentNode.value)
+	if err != nil {
+		return nil, errors.WithMessagef(err, "failed to create parent value reference")
+	}
+
+	// Create a new Node in this closure that wraps the reference value
+	return &Node{
+		value:   closureValue,
+		shape:   parentNode.shape,
+		builder: b,
+	}, nil
+}
+
+// ClosureReturn calls Return on the closure function with the given output operations.
+// This converts backends.Op values to the appropriate stablehlo.Value types.
+// Returns an error if this is not a closure builder.
+func (b *Builder) ClosureReturn(outputs ...backends.Op) error {
+	if !b.isClosureBuilder {
+		return errors.New("ClosureReturn can only be called on closure builders")
+	}
+	if b.activeFn == nil {
+		return errors.New("closure builder has no active function")
+	}
+
+	// Convert backend ops to stablehlo values
+	values := make([]*stablehlo.Value, len(outputs))
+	for i, op := range outputs {
+		node, ok := op.(*Node)
+		if !ok {
+			return errors.Errorf("output %d: expected *Node, got %T", i, op)
+		}
+		values[i] = node.value
+	}
+
+	return b.activeFn.Return(values...)
+}
+
+// getActiveFn returns the function to build operations into.
+// This is either the main function or a closure if this is a closure builder.
+func (b *Builder) getActiveFn() *stablehlo.Function {
+	if b.activeFn != nil {
+		return b.activeFn
+	}
 	return b.fn
 }
 
@@ -511,7 +640,7 @@ func (b *Builder) broadcastForBinaryOps(
 func (b *Builder) shapeToTensor(value *stablehlo.Value) (*stablehlo.Value, error) {
 	shape := value.Shape()
 	rank := shape.Rank()
-	fn := b.fn
+	fn := b.getActiveFn()
 
 	// Create a slice to hold individual dimension sizes
 	dimValues := make([]*stablehlo.Value, rank)
@@ -568,7 +697,7 @@ func (b *Builder) shapeToTensor(value *stablehlo.Value) (*stablehlo.Value, error
 // the broadcast shape has symbolic dimensions. It tries to resolve dimensions from
 // the concrete operands when possible.
 func (b *Builder) createShapeTensorForBroadcast(broadcastShape shapes.Shape, lhsValue, rhsValue *stablehlo.Value) (*stablehlo.Value, error) {
-	fn := b.fn
+	fn := b.getActiveFn()
 	rank := broadcastShape.Rank()
 
 	// Create a slice to hold individual dimension sizes

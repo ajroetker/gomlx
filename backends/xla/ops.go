@@ -1309,3 +1309,55 @@ func (b *Builder) While(condFn, bodyFn any, initialStates ...backends.Op) ([]bac
 
 	return results, nil
 }
+
+// If selects between two branches based on a scalar boolean predicate.
+//
+// This implements the backends.Builder interface for StableHLO's if operation.
+// The predicate determines which branch to execute - trueBranch if predicate is true,
+// falseBranch if predicate is false. Both branches must return the same number of outputs
+// with matching shapes.
+//
+// Parameters:
+//   - predicate: A scalar boolean value that determines which branch to execute
+//   - trueFn: Function to execute when predicate is true (must be *stablehlo.Function)
+//   - falseFn: Function to execute when predicate is false (must be *stablehlo.Function)
+//
+// Returns:
+//   - []backends.Op: The outputs from whichever branch was executed
+//   - error: Any error that occurred during the operation
+func (b *Builder) If(predicate backends.Op, trueFn, falseFn any) ([]backends.Op, error) {
+	if err := b.CheckValid(); err != nil {
+		return nil, err
+	}
+
+	// Cast trueFn and falseFn to *stablehlo.Function
+	trueFunction, ok := trueFn.(*stablehlo.Function)
+	if !ok {
+		return nil, errors.Errorf("If: trueFn must be a *stablehlo.Function, got %T", trueFn)
+	}
+	falseFunction, ok := falseFn.(*stablehlo.Function)
+	if !ok {
+		return nil, errors.Errorf("If: falseFn must be a *stablehlo.Function, got %T", falseFn)
+	}
+
+	// Verify and convert predicate
+	predicateNodes, err := b.verifyAndCastValues("If", predicate)
+	if err != nil {
+		return nil, err
+	}
+	predicateNode := predicateNodes[0]
+
+	// Call stablehlo.If
+	resultValues, err := stablehlo.If(predicateNode.value, trueFunction, falseFunction)
+	if err != nil {
+		return nil, errors.WithMessage(err, "while building If operation")
+	}
+
+	// Convert results back to backends.Op
+	results := make([]backends.Op, len(resultValues))
+	for i, value := range resultValues {
+		results[i] = b.newNode(value)
+	}
+
+	return results, nil
+}
