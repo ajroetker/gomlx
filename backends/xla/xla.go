@@ -284,18 +284,16 @@ func BFloat16SliceFromXLA(slice []xlabfloat16.BFloat16) []bfloat16.BFloat16 {
 }
 
 // ShapeToXLA converts a GoMLX shape to a go-xla shape.
-// Dynamic dimensions (negative values) are replaced with 1 since XLA doesn't
-// support unbounded dimensions directly. The dynamic dimensions are tracked
-// at the GoMLX layer for pattern matching and gradients.
+// Dynamic dimensions (negative values) are mapped to xlashapes.DimUnknown.
 func ShapeToXLA(shape shapes.Shape) xlashapes.Shape {
 	if !shape.Ok() || shape.IsTuple() {
 		return xlashapes.Invalid()
 	}
-	// Clone dimensions and replace dynamic (negative) values with 1
+	// Clone dimensions and map any negative value to DimUnknown
 	dims := slices.Clone(shape.Dimensions)
 	for i, d := range dims {
 		if d < 0 {
-			dims[i] = 1 // Use 1 as placeholder for dynamic dimensions
+			dims[i] = xlashapes.DimUnknown
 		}
 	}
 	return xlashapes.Make(DTypeToXLA(shape.DType), dims...)
