@@ -443,23 +443,9 @@ func ScatterUpdate(operand, indices, updates *Node, sorted, unique bool) *Node {
 	dtype := operand.DType()
 	shape := operand.Shape()
 
-	// Check if shape has symbolic dimensions
-	hasSymbolic := false
-	for _, d := range shape.Dimensions {
-		if d < 0 {
-			hasSymbolic = true
-			break
-		}
-	}
-
-	// Check if updates has symbolic dimensions
-	updatesHasSymbolic := false
-	for _, d := range updates.Shape().Dimensions {
-		if d < 0 {
-			updatesHasSymbolic = true
-			break
-		}
-	}
+	// Check if shape or updates have dynamic dimensions
+	hasSymbolic := shape.IsDynamic()
+	updatesHasSymbolic := updates.Shape().IsDynamic()
 
 	var operandZeroed *Node
 	if hasSymbolic || updatesHasSymbolic {
