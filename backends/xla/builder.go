@@ -368,12 +368,6 @@ func (b *Builder) meshByName(meshName string) (*shardy.DeviceMesh, error) {
 	return nil, errors.Errorf("mesh %q not found", meshName)
 }
 
-// StableHLOFunction returns the underlying stablehlo.Function for advanced use cases.
-// This allows direct access to StableHLO features like While loops.
-func (b *Builder) StableHLOFunction() *stablehlo.Function {
-	return b.fn
-}
-
 func (b *Builder) shardingSpecToShardy(sharding *backends.ShardingSpec) (*shardy.ShardingSpec, error) {
 	if sharding == nil {
 		return nil, nil
