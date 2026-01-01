@@ -882,57 +882,6 @@ func hasConcreteBounds(bounds []int) bool {
 	return true
 }
 
-// computeReshapeBounds computes bounds for DynamicReshapeWithBounds when the
-// extracted dimensions don't match the operand size. It uses the maximum of
-// extracted dimensions and distributes the operand's total size.
-func computeReshapeBounds(operandShape shapes.Shape, extractedDims []int) []int {
-	operandSize := operandShape.Size()
-	if operandSize <= 0 {
-		// Operand has dynamic dimensions, use extracted dims as bounds
-		return extractedDims
-	}
-
-	bounds := make([]int, len(extractedDims))
-
-	// Use the operand size and extracted rank to compute reasonable bounds
-	// Strategy: for each dimension, use the max of extracted and a fair share
-	extractedSize := 1
-	for _, d := range extractedDims {
-		if d > 0 {
-			extractedSize *= d
-		}
-	}
-
-	// If extracted is smaller, scale up proportionally
-	if extractedSize > 0 && extractedSize < operandSize {
-		scale := (operandSize + extractedSize - 1) / extractedSize // ceiling division
-		for i, d := range extractedDims {
-			if d > 0 {
-				bounds[i] = d * scale
-			} else {
-				bounds[i] = operandSize // conservative
-			}
-		}
-	} else {
-		// Use extracted dims directly, they're already large enough
-		copy(bounds, extractedDims)
-	}
-
-	// Ensure bounds are at least as large as operand dimensions where applicable
-	operandDims := operandShape.Dimensions
-	for i := range bounds {
-		if i < len(operandDims) && operandDims[i] > bounds[i] {
-			bounds[i] = operandDims[i]
-		}
-		// Ensure minimum bound of 1
-		if bounds[i] <= 0 {
-			bounds[i] = operandSize // conservative fallback
-		}
-	}
-
-	return bounds
-}
-
 // computeFallbackBounds computes bounds when extraction fails completely.
 // Uses the operand's total size as a conservative upper bound for each dimension.
 func computeFallbackBounds(operandShape shapes.Shape, outputRank int) []int {

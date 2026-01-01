@@ -957,52 +957,6 @@ func (b *Builder) Concatenate(axis int, operands ...backends.Op) (backends.Op, e
 	return b.newNode(value), nil
 }
 
-// computeConcatenateShape computes the output shape for concatenation using GoMLX shapes
-func computeConcatenateShape(operands []*Node, axis int) shapes.Shape {
-	if len(operands) == 0 {
-		return shapes.Shape{}
-	}
-
-	firstShape := operands[0].shape
-	rank := firstShape.Rank()
-
-	// Adjust negative axis
-	if axis < 0 {
-		axis += rank
-	}
-
-	// Start with a copy of the first shape
-	outputDims := make([]int, rank)
-	copy(outputDims, firstShape.Dimensions)
-
-	// For the concatenation axis, sum up dimensions or use -3 if any are dynamic
-	concatDim := firstShape.Dimensions[axis]
-	for i := 1; i < len(operands); i++ {
-		currentDim := operands[i].shape.Dimensions[axis]
-		if concatDim >= 0 && currentDim >= 0 {
-			concatDim += currentDim
-		} else {
-			concatDim = -3 // Dynamic
-		}
-	}
-	outputDims[axis] = concatDim
-
-	// For non-concatenation axes, if one is dynamic and another is concrete, use concrete
-	for d := 0; d < rank; d++ {
-		if d == axis {
-			continue
-		}
-		for i := 1; i < len(operands); i++ {
-			currentDim := operands[i].shape.Dimensions[d]
-			if outputDims[d] < 0 && currentDim >= 0 {
-				outputDims[d] = currentDim
-			}
-		}
-	}
-
-	return shapes.MakeDynamic(firstShape.DType, outputDims...)
-}
-
 // Where implements backends.Builder interface.
 func (b *Builder) Where(condition, onTrue, onFalse backends.Op) (backends.Op, error) {
 	operandsNodes, err := b.verifyAndCastValues("Where", condition, onTrue, onFalse)
@@ -1543,12 +1497,10 @@ func (b *Builder) DynamicBroadcastInDim(operand backends.Op, outputDimensions ba
 	for i := range bounds {
 		// Check if this output dimension comes from the operand
 		operandIdx := -1
-		if broadcastDimensions != nil {
-			for j, bd := range broadcastDimensions {
-				if bd == i {
-					operandIdx = j
-					break
-				}
+		for j, bd := range broadcastDimensions {
+			if bd == i {
+				operandIdx = j
+				break
 			}
 		}
 		if operandIdx >= 0 && operandIdx < len(operandPhysicalDims) {

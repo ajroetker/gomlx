@@ -38,31 +38,7 @@ func (ni *nodeInputsDynamicReshapeWithBounds) String() string {
 	)
 }
 
-// backendDynamicReshapeWithBounds is a Graph wrapper for the backend.Builder.DynamicReshapeWithBounds method.
-func backendDynamicReshapeWithBounds(operand *Node, outputShape *Node, bounds []int) (node *Node) {
-	inputNodes := []*Node{operand, outputShape}
-	g := validateBuildingGraphFromInputs(inputNodes...)
-	inputs := &nodeInputsDynamicReshapeWithBounds{
-		operand:     operand,
-		outputShape: outputShape,
-		bounds:      bounds,
-	}
-	result, err := g.builder.DynamicReshapeWithBounds(operand.outputOps[0], outputShape.outputOps[0], bounds)
-	if err != nil {
-		panic(err)
-	}
-	node = &Node{
-		outputOps:    []backends.Op{result},
-		outputShapes: []shapes.Shape{mustNoError(g.builder.OpShape(result))},
-		graph:        g,
-		inputs:       inputs,
-		inputNodes:   inputNodes,
-	}
-	g.registerNode(node)
-	return
-}
-
-// backendDynamicReshapeWithBoundsAndShape is like backendDynamicReshapeWithBounds but allows
+// backendDynamicReshapeWithBoundsAndShape allows
 // explicitly setting the output shape for GoMLX shape propagation. This is needed when we want
 // to propagate extracted concrete dimensions to downstream operations while still using dynamic
 // reshape for XLA compilation.
@@ -197,32 +173,7 @@ func (ni *nodeInputsDynamicBroadcastInDimWithBounds) String() string {
 	)
 }
 
-// backendDynamicBroadcastInDimWithBounds is a Graph wrapper for the backend.Builder.DynamicBroadcastInDimWithBounds method.
-func backendDynamicBroadcastInDimWithBounds(operand *Node, outputDimensions *Node, broadcastDimensions []int, bounds []int) (node *Node) {
-	inputNodes := []*Node{operand, outputDimensions}
-	g := validateBuildingGraphFromInputs(inputNodes...)
-	inputs := &nodeInputsDynamicBroadcastInDimWithBounds{
-		operand:             operand,
-		outputDimensions:    outputDimensions,
-		broadcastDimensions: broadcastDimensions,
-		bounds:              bounds,
-	}
-	result, err := g.builder.DynamicBroadcastInDimWithBounds(operand.outputOps[0], outputDimensions.outputOps[0], broadcastDimensions, bounds)
-	if err != nil {
-		panic(err)
-	}
-	node = &Node{
-		outputOps:    []backends.Op{result},
-		outputShapes: []shapes.Shape{mustNoError(g.builder.OpShape(result))},
-		graph:        g,
-		inputs:       inputs,
-		inputNodes:   inputNodes,
-	}
-	g.registerNode(node)
-	return
-}
-
-// backendDynamicBroadcastInDimWithBoundsAndShape is like backendDynamicBroadcastInDimWithBounds but allows
+// backendDynamicBroadcastInDimWithBoundsAndShape allows
 // explicitly setting the output shape for GoMLX shape propagation.
 func backendDynamicBroadcastInDimWithBoundsAndShape(operand *Node, outputDimensions *Node, broadcastDimensions []int, bounds []int, outputDims []int) (node *Node) {
 	inputNodes := []*Node{operand, outputDimensions}

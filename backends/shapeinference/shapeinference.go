@@ -21,16 +21,6 @@ import (
 	"github.com/pkg/errors"
 )
 
-// hasSymbolicDim returns true if any dimension is symbolic (negative).
-func hasSymbolicDim(dims []int) bool {
-	for _, d := range dims {
-		if d < 0 {
-			return true
-		}
-	}
-	return false
-}
-
 // canBroadcast checks if operandDim can broadcast to outputDim.
 // Handles symbolic dimensions appropriately according to broadcasting rules.
 func canBroadcast(operandDim, outputDim int) bool {
@@ -51,33 +41,6 @@ func canBroadcast(operandDim, outputDim int) bool {
 		// Both concrete: must match exactly
 		return operandDim == outputDim
 	}
-}
-
-// symbolicMax returns the appropriate dimension for broadcasting two dimensions.
-// Handles both static and symbolic dimensions according to broadcasting rules.
-func symbolicMax(a, b int) int {
-	// Both symbolic
-	if a < 0 && b < 0 {
-		if a == b {
-			return a // Same symbolic dimension
-		}
-		return shapes.DynamicDim // Different symbols -> generic dynamic
-	}
-	// One or both are static
-	if a < 0 {
-		if b > 1 {
-			return b // Concrete > 1 wins over symbolic
-		}
-		return a // Symbolic wins over 1
-	}
-	if b < 0 {
-		if a > 1 {
-			return a // Concrete > 1 wins over symbolic
-		}
-		return b // Symbolic wins over 1
-	}
-	// Both static
-	return max(a, b)
 }
 
 var (

@@ -1268,12 +1268,8 @@ func (e *Exec) findOrCreateGraph(argsShapes []shapes.Shape) (*execGraphCacheEntr
 		}
 	}
 
-	// Pattern caching path: bucket shapes and try pattern match
-	// Skip bucketing if backend supports dynamic shapes AND pattern caching is not explicitly enabled.
-	// When SupportsDynamicShapes is true, graph creation is cheap (e.g., SimpleGo), so we don't
-	// need bucketing to reduce compilations - we can just create graphs for each unique shape.
-	// However, if the user explicitly enabled pattern caching, respect that (they may want
-	// bucketing for other reasons like memory efficiency).
+	// Pattern caching path: bucket shapes and try pattern match.
+	// Bucketing rounds dimensions to reduce unique shapes (e.g., pow2 bucketing).
 	shouldUseBucketing := e.enablePatternCaching && e.bucketingStrategy != nil
 	if shouldUseBucketing {
 		bucketedShapes := e.applyBucketing(argsShapes)
