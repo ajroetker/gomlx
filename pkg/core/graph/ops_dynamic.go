@@ -307,7 +307,7 @@ func DynamicReshape(operand *Node, outputShape *Node) *Node {
 		return backendDynamicReshapeWithBoundsAndShape(operand, outputShape, defaultBounds, defaultDims)
 	}
 
-	return backendDynamicReshape(operand, outputShape)
+	panic("DynamicReshape is not supported: cannot determine output rank from shape tensor")
 }
 
 // DynamicReshapeWithBounds reshapes operand to the shape specified by outputShape tensor,
