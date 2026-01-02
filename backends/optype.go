@@ -114,6 +114,15 @@ const (
 	OpTypeTranspose
 	OpTypeWhere
 
+	// Collective operations for distributed/SPMD execution
+	OpTypeAllReduce
+	OpTypeAllGather
+	OpTypeReduceScatter
+	OpTypeCollectiveBroadcast
+	OpTypeCollectivePermute
+	OpTypeReplicaId
+	OpTypePartitionId
+
 	// OpTypeLast should always be kept the last, it is used as a counter/marker for OpType.
 	OpTypeLast
 )
