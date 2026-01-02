@@ -179,3 +179,40 @@ func (b Builder) BatchNormForTraining(operand, scale, offset backends.Op, epsilo
 func (b Builder) BatchNormGradient(operand, scale, mean, variance, gradOutput backends.Op, epsilon float32, axis int) (gradOperand, gradScale, gradOffset backends.Op, err error) {
 	return nil, nil, nil, b.baseErrFn(backends.OpTypeBatchNormGradient)
 }
+
+// Collective operations for distributed/SPMD execution
+
+// AllReduce performs a reduction operation across all replicas and broadcasts the result back.
+func (b Builder) AllReduce(input backends.Op, reduceOp backends.ReduceOpType, replicaGroups [][]int) (backends.Op, error) {
+	return nil, b.baseErrFn(backends.OpTypeAllReduce)
+}
+
+// AllGather gathers tensors from all replicas and concatenates them along the specified axis.
+func (b Builder) AllGather(input backends.Op, gatherAxis int, replicaGroups [][]int) (backends.Op, error) {
+	return nil, b.baseErrFn(backends.OpTypeAllGather)
+}
+
+// ReduceScatter performs a reduction across all replicas and scatters the result.
+func (b Builder) ReduceScatter(input backends.Op, reduceOp backends.ReduceOpType, scatterAxis int, replicaGroups [][]int) (backends.Op, error) {
+	return nil, b.baseErrFn(backends.OpTypeReduceScatter)
+}
+
+// CollectiveBroadcast broadcasts a tensor from one replica to all other replicas.
+func (b Builder) CollectiveBroadcast(input backends.Op, sourceReplicaId int, replicaGroups [][]int) (backends.Op, error) {
+	return nil, b.baseErrFn(backends.OpTypeCollectiveBroadcast)
+}
+
+// CollectivePermute sends data from each replica to a specified target replica.
+func (b Builder) CollectivePermute(input backends.Op, sourceTargetPairs [][2]int) (backends.Op, error) {
+	return nil, b.baseErrFn(backends.OpTypeCollectivePermute)
+}
+
+// ReplicaId returns a scalar tensor containing the replica ID of the current device.
+func (b Builder) ReplicaId() (backends.Op, error) {
+	return nil, b.baseErrFn(backends.OpTypeReplicaId)
+}
+
+// PartitionId returns a scalar tensor containing the partition ID of the current device.
+func (b Builder) PartitionId() (backends.Op, error) {
+	return nil, b.baseErrFn(backends.OpTypePartitionId)
+}

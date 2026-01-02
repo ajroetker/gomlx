@@ -342,3 +342,77 @@ func (b *Builder) IsNaN(x backends.Op) (backends.Op, error) {
 	}
 	return result, nil
 }
+
+// collectiveOpsNotImplementedError returns a descriptive error for collective operations
+// that are not yet implemented in the underlying xlabuilder package.
+func collectiveOpsNotImplementedError(opName string) error {
+	return errors.Errorf(
+		"%s is not yet implemented in the XLA backend: "+
+			"the underlying gopjrt/xlabuilder package needs to add support for cross-replica "+
+			"collective operations (AllReduce, AllGather, etc.) - "+
+			"see https://openxla.org/xla/operation_semantics for XLA operation semantics",
+		opName)
+}
+
+// AllReduce performs a reduction operation across all replicas and broadcasts the result back.
+// Currently not implemented - requires xlabuilder support for cross-replica operations.
+func (b *Builder) AllReduce(input backends.Op, reduceOp backends.ReduceOpType, replicaGroups [][]int) (backends.Op, error) {
+	if _, err := b.verifyAndCastOp(input, "input"); err != nil {
+		return nil, err
+	}
+	return nil, collectiveOpsNotImplementedError("AllReduce")
+}
+
+// AllGather gathers tensors from all replicas and concatenates them along the specified axis.
+// Currently not implemented - requires xlabuilder support for cross-replica operations.
+func (b *Builder) AllGather(input backends.Op, gatherAxis int, replicaGroups [][]int) (backends.Op, error) {
+	if _, err := b.verifyAndCastOp(input, "input"); err != nil {
+		return nil, err
+	}
+	return nil, collectiveOpsNotImplementedError("AllGather")
+}
+
+// ReduceScatter performs a reduction across all replicas and scatters the result.
+// Currently not implemented - requires xlabuilder support for cross-replica operations.
+func (b *Builder) ReduceScatter(input backends.Op, reduceOp backends.ReduceOpType, scatterAxis int, replicaGroups [][]int) (backends.Op, error) {
+	if _, err := b.verifyAndCastOp(input, "input"); err != nil {
+		return nil, err
+	}
+	return nil, collectiveOpsNotImplementedError("ReduceScatter")
+}
+
+// CollectiveBroadcast broadcasts a tensor from one replica to all other replicas.
+// Currently not implemented - requires xlabuilder support for cross-replica operations.
+func (b *Builder) CollectiveBroadcast(input backends.Op, sourceReplicaId int, replicaGroups [][]int) (backends.Op, error) {
+	if _, err := b.verifyAndCastOp(input, "input"); err != nil {
+		return nil, err
+	}
+	return nil, collectiveOpsNotImplementedError("CollectiveBroadcast")
+}
+
+// CollectivePermute sends data from each replica to a specified target replica.
+// Currently not implemented - requires xlabuilder support for cross-replica operations.
+func (b *Builder) CollectivePermute(input backends.Op, sourceTargetPairs [][2]int) (backends.Op, error) {
+	if _, err := b.verifyAndCastOp(input, "input"); err != nil {
+		return nil, err
+	}
+	return nil, collectiveOpsNotImplementedError("CollectivePermute")
+}
+
+// ReplicaId returns a scalar tensor containing the replica ID of the current device.
+// Currently not implemented - requires xlabuilder support for cross-replica operations.
+func (b *Builder) ReplicaId() (backends.Op, error) {
+	if err := b.CheckValid(); err != nil {
+		return nil, err
+	}
+	return nil, collectiveOpsNotImplementedError("ReplicaId")
+}
+
+// PartitionId returns a scalar tensor containing the partition ID of the current device.
+// Currently not implemented - requires xlabuilder support for cross-replica operations.
+func (b *Builder) PartitionId() (backends.Op, error) {
+	if err := b.CheckValid(); err != nil {
+		return nil, err
+	}
+	return nil, collectiveOpsNotImplementedError("PartitionId")
+}
