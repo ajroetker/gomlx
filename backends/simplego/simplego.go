@@ -76,6 +76,9 @@ func New(config string) (backends.Backend, error) {
 		case "dotgeneral_smallmatmul":
 			// Force DotGeneral to use the SmallMatMul fast path (for small float32 matrices).
 			b.dotGeneralForceExecutionPath = smallMatMulPath
+		case "dotgeneral_highway":
+			// Force DotGeneral to use the go-highway SIMD matmul path.
+			b.dotGeneralForceExecutionPath = highwayMatMulPath
 		case "ops_sequential":
 			// This will force the ops to be executed sequentially.
 			// The default is running parallel if it's the only thing executing, otherwise sequentially.

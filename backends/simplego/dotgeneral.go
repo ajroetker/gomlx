@@ -269,6 +269,8 @@ const (
 	blockedPath
 	// smallMatMulPath uses the SmallMatMul fast path (small float32 matrices in standard order)
 	smallMatMulPath
+	// highwayMatMulPath uses go-highway's optimized SIMD matmul
+	highwayMatMulPath
 	// checkPath runs both paths and compares outputs (for debugging)
 	checkPath
 )
@@ -288,6 +290,8 @@ func dgSelectExecPath(backend *Backend, lhsShape, rhsShape shapes.Shape, params 
 		case smallMatMulPath:
 			valid = isMatMulOrder(lhsShape, rhsShape, params.lhsContractingAxes, params.rhsContractingAxes,
 				params.lhsBatchAxes, params.rhsBatchAxes)
+		case highwayMatMulPath:
+			valid = dgUseHighwayMatMul(dtype, lhsShape, rhsShape, params)
 		default:
 			valid = true
 		}
@@ -297,7 +301,14 @@ func dgSelectExecPath(backend *Backend, lhsShape, rhsShape shapes.Shape, params 
 		klog.V(1).Infof("DotGeneral: forced path %s is invalid for problem size %s×%s\n", backend.dotGeneralForceExecutionPath, lhsShape, rhsShape)
 	}
 
-	// Check for SmallMatMul fast path first.
+	// Check for go-highway SIMD matmul path.
+	// go-highway uses "broadcast A, stream B" algorithm with optimal SIMD utilization.
+	// It handles both small and large matrices efficiently via auto-selection.
+	if dgUseHighwayMatMul(dtype, lhsShape, rhsShape, params) {
+		return highwayMatMulPath
+	}
+
+	// Check for SmallMatMul fast path (fallback for non-highway cases).
 	// SmallMatMul is beneficial for small float32 matrices in standard [M,K]×[K,N] order.
 	if dgUseSmallMatMul(dtype, lhsShape, rhsShape, params) {
 		return smallMatMulPath
@@ -373,6 +384,21 @@ func execDotGeneral(backend *Backend, node *Node, inputs []*Buffer, _ []bool) (*
 			}
 			backend.putBuffer(output2) // Discard second output, no longer needed
 		}
+
+	case highwayMatMulPath:
+		// go-highway SIMD matmul: uses "broadcast A, stream B" algorithm.
+		// Avoids expensive horizontal reductions, optimal for both small and large matrices.
+		dtype := lhs.shape.DType
+		switch dtype {
+		case dtypes.Float32:
+			execDotGeneralHighwayFloat32(backend, lhs, rhs, params, output)
+		case dtypes.Float64:
+			execDotGeneralHighwayFloat64(backend, lhs, rhs, params, output)
+		default:
+			backend.putBuffer(output)
+			return nil, errors.Errorf("highwayMatMulPath: unsupported dtype %s", dtype)
+		}
+		return output, nil
 
 	case smallMatMulPath:
 		// SmallMatMul fast path: small float32 matrices in standard [M,K]×[K,N] order.
