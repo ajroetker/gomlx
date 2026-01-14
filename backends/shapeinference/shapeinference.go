@@ -411,15 +411,48 @@ func WhereOp(condition, onTrue, onFalse shapes.Shape) (output shapes.Shape, err 
 }
 
 // ReshapeOp to the given dimensions: trivial output shape, but this function also checks
-// that the sizes are the same.
+// that the sizes are the same (when both are fully concrete).
 //
-// Notice the backends.Reshape doesn't support auto-scaling dimensions (set to -1), as graph.Reshape does.
+// For dynamic shapes (with DimDynamic = -1), the size check is skipped since sizes
+// are unknown at graph-build time. The actual size validation happens at execution time.
 func ReshapeOp(operand shapes.Shape, dims []int) (output shapes.Shape, err error) {
-	output = shapes.Make(operand.DType, dims...)
-	if operand.Size() != output.Size() {
-		err = errors.Errorf("Reshape() cannot reshape %s to dimensions %v, their size don't match",
-			operand, dims)
-		return shapes.Invalid(), err
+	// Check if dims contains any dynamic dimensions
+	hasDynamic := false
+	for _, d := range dims {
+		if d == shapes.DimDynamic {
+			hasDynamic = true
+			break
+		}
+	}
+
+	if hasDynamic {
+		// Create shape manually with dimensions and empty axis names.
+		// This preserves the DimDynamic marker without requiring axis names.
+		output = shapes.Shape{
+			DType:      operand.DType,
+			Dimensions: slices.Clone(dims),
+			AxisNames:  make([]string, len(dims)),
+		}
+		// Try to propagate axis names from operand if it has named axes
+		// and the reshape preserves rank (a common case).
+		if len(dims) == operand.Rank() && operand.HasNamedAxes() {
+			for i, name := range operand.AxisNames {
+				if i < len(output.AxisNames) {
+					output.AxisNames[i] = name
+				}
+			}
+		}
+	} else {
+		output = shapes.Make(operand.DType, dims...)
+	}
+
+	// Only check sizes when both operand and output are fully concrete
+	if operand.IsFullyConcrete() && output.IsFullyConcrete() {
+		if operand.Size() != output.Size() {
+			err = errors.Errorf("Reshape() cannot reshape %s to dimensions %v, their size don't match",
+				operand, dims)
+			return shapes.Invalid(), err
+		}
 	}
 	return
 }

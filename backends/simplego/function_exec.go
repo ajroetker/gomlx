@@ -119,6 +119,11 @@ type funcExecBuffers struct {
 	// graphs with dynamic axes.
 	nodeShapes []shapes.Shape
 
+	// opParams holds pre-computed operation parameters for nodes that need them.
+	// If nil, use default parameters from node.data. Set from ShapeSpecialization
+	// when executing graphs with dynamic axes.
+	opParams []any
+
 	// Sequential execution-only: reused for each op.
 	opInputBuffers []*Buffer
 	opInputsOwned  []bool
@@ -152,11 +157,13 @@ func (fe *FunctionExecutable) Execute(backend *Backend, inputs []*Buffer, donate
 		execBuf.remainingDeps[i] = 0
 	}
 
-	// Set resolved shapes from specialization if available
+	// Set resolved shapes and operation params from specialization if available
 	if spec != nil {
 		execBuf.nodeShapes = spec.nodeShapes
+		execBuf.opParams = spec.opParams
 	} else {
 		execBuf.nodeShapes = nil
+		execBuf.opParams = nil
 	}
 
 	// Set up parameters from inputs using builderIdx directly
@@ -392,6 +399,23 @@ func (fe *FunctionExecutable) executeNode(backend *Backend, node *Node, execBuf 
 		// Create a shallow copy with the resolved shape
 		nodeCopy := *node
 		nodeCopy.shape = execBuf.nodeShapes[nodeIdx]
+
+		// For operations with specialized params, merge them into node.data
+		if execBuf.opParams != nil && execBuf.opParams[nodeIdx] != nil {
+			switch specParams := execBuf.opParams[nodeIdx].(type) {
+			case *DotGeneralSpecParams:
+				// Merge build-time params with runtime specialized params
+				origParams := node.data.(*dotGeneralNodeData)
+				mergedParams := *origParams // shallow copy
+				mergedParams.execPath = specParams.execPath
+				mergedParams.batchSize = specParams.batchSize
+				mergedParams.lhsCrossSize = specParams.lhsCrossSize
+				mergedParams.rhsCrossSize = specParams.rhsCrossSize
+				mergedParams.contractingSize = specParams.contractingSize
+				nodeCopy.data = &mergedParams
+			}
+		}
+
 		execNode = &nodeCopy
 	}
 

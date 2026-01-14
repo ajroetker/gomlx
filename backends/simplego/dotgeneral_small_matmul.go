@@ -139,6 +139,14 @@ const smallMatMulMaxSize = 256 * 1024 // 256Kb
 // SmallMatMul skips transpose overhead but has strided RHS access, so it's only
 // beneficial for small float32 matrices in standard [M,K]×[K,N] order.
 func dgUseSmallMatMul(dtype dtypes.DType, lhsShape, rhsShape shapes.Shape, params *dotGeneralNodeData) bool {
+	return dgUseSmallMatMulWithSizes(dtype, lhsShape, rhsShape, params,
+		params.batchSize, params.lhsCrossSize, params.rhsCrossSize, params.contractingSize)
+}
+
+// dgUseSmallMatMulWithSizes checks SmallMatMul eligibility using explicitly provided sizes.
+// This is useful for specialization when params may contain DimDynamic (-1) but we have concrete sizes.
+func dgUseSmallMatMulWithSizes(dtype dtypes.DType, lhsShape, rhsShape shapes.Shape, params *dotGeneralNodeData,
+	batchSize, lhsCrossSize, rhsCrossSize, contractingSize int) bool {
 	// Only support float32 for SmallMatMul (most common case)
 	if dtype != dtypes.Float32 {
 		return false
@@ -153,7 +161,7 @@ func dgUseSmallMatMul(dtype dtypes.DType, lhsShape, rhsShape shapes.Shape, param
 
 	// For large batch sizes, the normalized path with batch parallelism is faster.
 	// The small matmul path processes batches sequentially without parallelization.
-	if params.batchSize > smallMatMulMaxBatchSize {
+	if batchSize > smallMatMulMaxBatchSize {
 		return false
 	}
 
@@ -161,13 +169,13 @@ func dgUseSmallMatMul(dtype dtypes.DType, lhsShape, rhsShape shapes.Shape, param
 	// dominates when computing just one output row per batch.
 	// BUT we still need to check rhsCrossSize and contractingSize - for M=1 with huge N or K,
 	// the strided access causes cache thrashing.
-	if params.lhsCrossSize == 1 {
+	if lhsCrossSize == 1 {
 		// For M=1, use larger thresholds since transpose overhead is more significant
 		// But still cap to avoid catastrophic cache behavior with very large dimensions
-		if params.rhsCrossSize > smallMatMulMaxRhsCrossSizeM1 {
+		if rhsCrossSize > smallMatMulMaxRhsCrossSizeM1 {
 			return false
 		}
-		if params.contractingSize > smallMatMulMaxContractingSizeM1 {
+		if contractingSize > smallMatMulMaxContractingSizeM1 {
 			return false
 		}
 		return true
@@ -176,20 +184,20 @@ func dgUseSmallMatMul(dtype dtypes.DType, lhsShape, rhsShape shapes.Shape, param
 	// For multi-row operations, check both contracting and RHS cross dimensions.
 	// The RHS is accessed with stride N (rhsCrossSize), so large N causes more cache
 	// misses per contracting step.
-	if params.contractingSize > smallMatMulMaxContractingSize {
+	if contractingSize > smallMatMulMaxContractingSize {
 		return false
 	}
 
 	// Check RHS cross size (N) - large N means large stride in RHS access
-	if params.rhsCrossSize > smallMatMulMaxRhsCrossSize {
+	if rhsCrossSize > smallMatMulMaxRhsCrossSize {
 		return false
 	}
 
 	// Larger data size benefit from the blocking done by the blocked and normalized paths.
-	problemSize := /* LHS size */ params.lhsCrossSize*params.contractingSize +
-		/* RHS size */ params.rhsCrossSize*params.contractingSize +
-		/* Output size */ params.lhsCrossSize*params.rhsCrossSize
-	problemSize *= params.batchSize
+	problemSize := /* LHS size */ lhsCrossSize*contractingSize +
+		/* RHS size */ rhsCrossSize*contractingSize +
+		/* Output size */ lhsCrossSize*rhsCrossSize
+	problemSize *= batchSize
 	problemSize *= dtype.Size()
 	if problemSize > smallMatMulMaxSize {
 		return false

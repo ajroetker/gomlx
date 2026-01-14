@@ -6,6 +6,7 @@ import (
 	"reflect"
 	"sync"
 
+	"github.com/gomlx/gomlx/backends"
 	"github.com/gomlx/gomlx/pkg/core/dtypes"
 	"github.com/gomlx/gomlx/pkg/core/shapes"
 )
@@ -24,6 +25,25 @@ type ShapeSpecialization struct {
 	// bufferPool provides exact-sized buffer pools for this specialization.
 	// Pre-created for all unique (dtype, size) combinations in nodeShapes.
 	bufferPool *ShapeSpecificPool
+
+	// opParams holds pre-computed operation parameters for nodes that need them.
+	// Indexed by node.builderIdx. Nil for nodes that don't need specialized params.
+	// Currently used for DotGeneral to store algorithm selection based on concrete shapes.
+	opParams []any
+}
+
+// DotGeneralSpecParams holds pre-computed parameters for DotGeneral operations.
+// These are computed at specialization time with concrete shapes, allowing
+// proper algorithm selection that couldn't happen at build time with dynamic shapes.
+type DotGeneralSpecParams struct {
+	// execPath is the selected execution strategy based on concrete sizes.
+	execPath dotGeneralExecutionPath
+
+	// Concrete sizes computed from resolved shapes.
+	batchSize       int
+	lhsCrossSize    int
+	rhsCrossSize    int
+	contractingSize int
 }
 
 // poolKey identifies a buffer pool by dtype and size.
@@ -138,7 +158,55 @@ func newSpecialization(builder *Builder, bindings shapes.AxisBindings) *ShapeSpe
 	// Create buffer pools for all unique (dtype, size) combinations
 	spec.bufferPool = newShapeSpecificPool(spec.nodeShapes)
 
+	// Pre-compute operation-specific parameters (e.g., DotGeneral algorithm selection)
+	spec.computeOpParams(builder)
+
 	return spec
+}
+
+// computeOpParams pre-computes operation parameters for nodes that need them.
+// Currently handles DotGeneral operations to select the optimal algorithm
+// based on concrete shapes rather than symbolic ones.
+func (s *ShapeSpecialization) computeOpParams(builder *Builder) {
+	s.opParams = make([]any, len(builder.nodes))
+	for nodeIdx, node := range builder.nodes {
+		switch node.opType {
+		case backends.OpTypeDotGeneral:
+			s.opParams[nodeIdx] = s.computeDotGeneralParams(builder, node)
+		}
+	}
+}
+
+// computeDotGeneralParams computes specialized parameters for a DotGeneral operation.
+// It recalculates sizes from resolved shapes and selects the execution path accordingly.
+func (s *ShapeSpecialization) computeDotGeneralParams(builder *Builder, node *Node) *DotGeneralSpecParams {
+	if len(node.inputs) < 2 {
+		return nil
+	}
+
+	params := node.data.(*dotGeneralNodeData)
+
+	// Get resolved shapes for inputs
+	lhsIdx := node.inputs[0].builderIdx
+	rhsIdx := node.inputs[1].builderIdx
+	lhsShape := s.nodeShapes[lhsIdx]
+	rhsShape := s.nodeShapes[rhsIdx]
+
+	// Recalculate sizes with concrete shapes
+	batchSize, lhsCrossSize, contractingSize, _ := dgFindSizes(lhsShape, params.lhsContractingAxes, params.lhsBatchAxes)
+	_, rhsCrossSize, _, _ := dgFindSizes(rhsShape, params.rhsContractingAxes, params.rhsBatchAxes)
+
+	// Select execution path with concrete sizes
+	execPath := dgSelectExecPathWithSizes(builder.backend, lhsShape, rhsShape, params,
+		batchSize, lhsCrossSize, rhsCrossSize, contractingSize)
+
+	return &DotGeneralSpecParams{
+		execPath:        execPath,
+		batchSize:       batchSize,
+		lhsCrossSize:    lhsCrossSize,
+		rhsCrossSize:    rhsCrossSize,
+		contractingSize: contractingSize,
+	}
 }
 
 // NodeShape returns the resolved shape for the node at the given builder index.

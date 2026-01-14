@@ -372,6 +372,110 @@ func TestShapeSpecificPool(t *testing.T) {
 	require.GreaterOrEqual(t, spec.bufferPool.numPools(), 2)
 }
 
+func TestDynamicShapeDotGeneral(t *testing.T) {
+	// Test that DotGeneral works correctly with dynamic batch dimension.
+	// This verifies:
+	// 1. Algorithm selection uses concrete sizes (not DimDynamic)
+	// 2. Execution path is re-computed per specialization
+	// 3. Results are correct with different batch sizes
+	builder := backend.Builder("test_dynamic_dotgeneral")
+	mainFn := builder.Main()
+
+	// Create matrices: A [batch, 4, 8] × B [batch, 8, 3] = C [batch, 4, 3]
+	// Using batch dimension as both batch axes
+	aShape := shapes.MakeDynamic(dtypes.Float32, "batch", 4, 8)
+	bShape := shapes.MakeDynamic(dtypes.Float32, "batch", 8, 3)
+
+	a, err := mainFn.Parameter("a", aShape, nil)
+	require.NoError(t, err)
+
+	b, err := mainFn.Parameter("b", bShape, nil)
+	require.NoError(t, err)
+
+	// DotGeneral: contract last axis of A with second-to-last axis of B, batch over first axis
+	// A: [batch, 4, 8] - contracting axis 2 (8), batch axis 0
+	// B: [batch, 8, 3] - contracting axis 1 (8), batch axis 0
+	c, err := mainFn.DotGeneral(a, []int{2}, []int{0}, b, []int{1}, []int{0})
+	require.NoError(t, err)
+
+	err = mainFn.Return([]backends.Value{c}, nil)
+	require.NoError(t, err)
+
+	exec, err := builder.Compile()
+	require.NoError(t, err)
+
+	simpleGoExec := exec.(*Executable)
+	require.True(t, simpleGoExec.hasDynamicAxes)
+
+	// Execute with batch=2
+	// A: 2×4×8 = 64 elements, B: 2×8×3 = 48 elements
+	aData := make([]float32, 2*4*8)
+	for i := range aData {
+		aData[i] = float32(i + 1)
+	}
+	bData := make([]float32, 2*8*3)
+	for i := range bData {
+		bData[i] = float32(i + 1) * 0.1
+	}
+
+	inputA, err := backend.BufferFromFlatData(0, aData, shapes.Make(dtypes.Float32, 2, 4, 8))
+	require.NoError(t, err)
+	inputB, err := backend.BufferFromFlatData(0, bData, shapes.Make(dtypes.Float32, 2, 8, 3))
+	require.NoError(t, err)
+
+	outputs, err := exec.Execute([]backends.Buffer{inputA, inputB}, nil, 0)
+	require.NoError(t, err)
+	require.Len(t, outputs, 1)
+
+	// Verify output shape is [2, 4, 3]
+	outputShape, err := backend.BufferShape(outputs[0])
+	require.NoError(t, err)
+	require.Equal(t, dtypes.Float32, outputShape.DType)
+	require.Equal(t, []int{2, 4, 3}, outputShape.Dimensions)
+
+	// Verify specialization was created with correct opParams
+	spec1, ok := simpleGoExec.specializations.Load("batch=2")
+	require.True(t, ok)
+	spec := spec1.(*ShapeSpecialization)
+
+	// Find the DotGeneral node and verify opParams
+	var dotGeneralIdx int
+	for i, node := range simpleGoExec.builder.nodes {
+		if node.opType == backends.OpTypeDotGeneral {
+			dotGeneralIdx = i
+			break
+		}
+	}
+	require.NotNil(t, spec.opParams)
+	dgParams := spec.opParams[dotGeneralIdx]
+	require.NotNil(t, dgParams, "DotGeneral should have specialized params")
+	dgSpecParams := dgParams.(*DotGeneralSpecParams)
+	require.Equal(t, 2, dgSpecParams.batchSize)
+	require.Equal(t, 4, dgSpecParams.lhsCrossSize)
+	require.Equal(t, 3, dgSpecParams.rhsCrossSize)
+	require.Equal(t, 8, dgSpecParams.contractingSize)
+
+	// Execute with batch=1 (different specialization)
+	inputA2, err := backend.BufferFromFlatData(0, aData[:32], shapes.Make(dtypes.Float32, 1, 4, 8))
+	require.NoError(t, err)
+	inputB2, err := backend.BufferFromFlatData(0, bData[:24], shapes.Make(dtypes.Float32, 1, 8, 3))
+	require.NoError(t, err)
+
+	outputs2, err := exec.Execute([]backends.Buffer{inputA2, inputB2}, nil, 0)
+	require.NoError(t, err)
+	require.Len(t, outputs2, 1)
+
+	// Verify output shape is [1, 4, 3]
+	outputShape2, err := backend.BufferShape(outputs2[0])
+	require.NoError(t, err)
+	require.Equal(t, []int{1, 4, 3}, outputShape2.Dimensions)
+
+	// Verify a different specialization was created
+	spec2, ok := simpleGoExec.specializations.Load("batch=1")
+	require.True(t, ok)
+	require.NotSame(t, spec1, spec2)
+}
+
 func TestDynamicShapeWithIota(t *testing.T) {
 	// Test that Iota works correctly with dynamic shapes.
 	// Iota uses node.shape directly for buffer allocation, so this verifies

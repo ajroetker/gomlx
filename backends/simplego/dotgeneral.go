@@ -163,29 +163,59 @@ func (f *Function) DotGeneral(lhsOp backends.Value, lhsContractingAxes, lhsBatch
 	params.batchSize, params.lhsCrossSize, params.contractingSize, lhsCrossDims = dgFindSizes(lhs.shape, lhsContractingAxes, lhsBatchAxes)
 	_, params.rhsCrossSize, _, rhsCrossDims = dgFindSizes(rhs.shape, rhsContractingAxes, rhsBatchAxes)
 
-	// Check that all sizes are positive
-	if params.batchSize <= 0 || params.lhsCrossSize <= 0 || params.contractingSize <= 0 || params.rhsCrossSize <= 0 {
-		return nil, errors.Errorf("DotGeneral sizes must be positive: lhs(batch=%d, cross=%d, contracting=%d), rhs(cross=%d)",
-			params.batchSize, params.lhsCrossSize, params.contractingSize,
-			params.rhsCrossSize)
+	// Check that all sizes are positive (or DimDynamic for dynamic shapes).
+	// At build time, DimDynamic (-1) is allowed for dimensions that will be resolved
+	// at execution time. Zero-sized dimensions are always invalid.
+	checkSize := func(size int, name string) error {
+		if size == 0 {
+			return errors.Errorf("DotGeneral %s size cannot be zero", name)
+		}
+		if size < shapes.DimDynamic {
+			return errors.Errorf("DotGeneral %s size has invalid value %d", name, size)
+		}
+		return nil
+	}
+	if err := checkSize(params.batchSize, "batch"); err != nil {
+		return nil, err
+	}
+	if err := checkSize(params.lhsCrossSize, "lhsCross"); err != nil {
+		return nil, err
+	}
+	if err := checkSize(params.contractingSize, "contracting"); err != nil {
+		return nil, err
+	}
+	if err := checkSize(params.rhsCrossSize, "rhsCross"); err != nil {
+		return nil, err
 	}
 
 	params.lhsNormalization = dgNormalizePrepare(lhs.shape, params.lhsContractingAxes, params.lhsBatchAxes)
 	params.rhsNormalization = dgNormalizePrepare(rhs.shape, params.rhsContractingAxes, params.rhsBatchAxes)
 
-	blockLog2Dim := DotGeneralTargetBlockLog2Dim[dtype]
-	params.lhsBlockedShape = dgCreateBlockedShape(dtype, params.batchSize, params.lhsCrossSize, params.contractingSize, blockLog2Dim)
-	params.rhsBlockedShape = dgCreateBlockedShape(dtype, params.batchSize, params.rhsCrossSize, params.contractingSize, blockLog2Dim)
-	outputDType := dtype
-	if dtype == dtypes.BFloat16 || dtype == dtypes.Float16 {
-		// For 16 bits, store the intermediary results as float32 to minimize numerical errors during accumulation.
-		// Notice the blockLog2Dim must be the same, because the block dimensions much match the inputs.
-		outputDType = dtypes.Float32
+	// Check if we have dynamic dimensions - if so, skip blocked shape creation and
+	// use normalizedPath which doesn't require pre-blocking.
+	hasDynamic := params.batchSize == shapes.DimDynamic ||
+		params.lhsCrossSize == shapes.DimDynamic ||
+		params.rhsCrossSize == shapes.DimDynamic ||
+		params.contractingSize == shapes.DimDynamic
+
+	// Only create blocked shapes when we have concrete dimensions.
+	// With dynamic shapes, we use normalizedPath which doesn't need blocked shapes.
+	if !hasDynamic {
+		blockLog2Dim := DotGeneralTargetBlockLog2Dim[dtype]
+		params.lhsBlockedShape = dgCreateBlockedShape(dtype, params.batchSize, params.lhsCrossSize, params.contractingSize, blockLog2Dim)
+		params.rhsBlockedShape = dgCreateBlockedShape(dtype, params.batchSize, params.rhsCrossSize, params.contractingSize, blockLog2Dim)
+		outputDType := dtype
+		if dtype == dtypes.BFloat16 || dtype == dtypes.Float16 {
+			// For 16 bits, store the intermediary results as float32 to minimize numerical errors during accumulation.
+			// Notice the blockLog2Dim must be the same, because the block dimensions much match the inputs.
+			outputDType = dtypes.Float32
+		}
+		params.outputBlockedShape = dgCreateBlockedShape(outputDType, params.batchSize, params.lhsCrossSize, params.rhsCrossSize, blockLog2Dim)
 	}
-	params.outputBlockedShape = dgCreateBlockedShape(outputDType, params.batchSize, params.lhsCrossSize, params.rhsCrossSize, blockLog2Dim)
 
 	// Select execution path at build time based on problem size and matrix layout.
 	// This enables proper deduplication of pre-blocked inputs via getOrCreateNode.
+	// With dynamic shapes, this will return normalizedPath.
 	params.execPath = dgSelectExecPath(f.builder.backend, lhs.shape, rhs.shape, &params)
 	klog.V(1).Infof("DotGeneral execPath: %s\n", params.execPath)
 
@@ -200,6 +230,39 @@ func (f *Function) DotGeneral(lhsOp backends.Value, lhsContractingAxes, lhsBatch
 			params.batchSize, params.rhsCrossSize, params.contractingSize)
 	}
 
+	// Create the output shape. For dynamic shapes, use MakeDynamic to preserve axis names.
+	var outputShape shapes.Shape
+	if hasDynamic {
+		// Build output dimensions, propagating axis names from inputs
+		outputDims := make([]any, 0, 3)
+		// Batch dimensions: use lhs axis names for batch
+		if params.batchSize == shapes.DimDynamic {
+			// Find the axis name from lhs batch axes
+			if len(params.lhsBatchAxes) > 0 && lhs.shape.AxisName(params.lhsBatchAxes[0]) != "" {
+				outputDims = append(outputDims, lhs.shape.AxisName(params.lhsBatchAxes[0]))
+			} else {
+				outputDims = append(outputDims, shapes.DimDynamic)
+			}
+		} else {
+			outputDims = append(outputDims, params.batchSize)
+		}
+		// LHS cross size
+		if params.lhsCrossSize == shapes.DimDynamic {
+			outputDims = append(outputDims, shapes.DimDynamic)
+		} else {
+			outputDims = append(outputDims, params.lhsCrossSize)
+		}
+		// RHS cross size
+		if params.rhsCrossSize == shapes.DimDynamic {
+			outputDims = append(outputDims, shapes.DimDynamic)
+		} else {
+			outputDims = append(outputDims, params.rhsCrossSize)
+		}
+		outputShape = shapes.MakeDynamic(dtype, outputDims...)
+	} else {
+		outputShape = shapes.Make(dtype, params.batchSize, params.lhsCrossSize, params.rhsCrossSize)
+	}
+
 	// Create dot-general node: it will generate a normalized output [batchSize, lhsCrossSize, rhsCrossSize].
 	var inputs []*Node
 	switch params.execPath {
@@ -211,7 +274,7 @@ func (f *Function) DotGeneral(lhsOp backends.Value, lhsContractingAxes, lhsBatch
 	default:
 		inputs = []*Node{lhs, rhs}
 	}
-	dotGeneral, _ := f.builder.getOrCreateNode(f, backends.OpTypeDotGeneral, shapes.Make(dtype, params.batchSize, params.lhsCrossSize, params.rhsCrossSize), inputs, &params)
+	dotGeneral, _ := f.builder.getOrCreateNode(f, backends.OpTypeDotGeneral, outputShape, inputs, &params)
 
 	// Reshape result to recover batch and cross dimensions.
 	resultingDims := make([]int, 0, len(batchDims)+len(lhsCrossDims)+len(rhsCrossDims))
@@ -239,18 +302,31 @@ func dgFindSizes(shape shapes.Shape, contractingAxes, batchAxes []int) (batchSiz
 	}
 
 	// Calculate sizes by multiplying dimensions according to the axis type.
+	// If any dimension is DimDynamic (-1), the corresponding size becomes DimDynamic.
 	batchSize, crossSize, contractingSize = 1, 1, 1
 	crossDims = make([]int, 0, rank-len(contractingAxes)-len(batchAxes))
 	for axis, axisType := range axesTypes {
 		dim := shape.Dimensions[axis]
 		switch axisType {
 		case 0: // Cross axes (unmarked)
-			crossSize *= dim
+			if dim == shapes.DimDynamic {
+				crossSize = shapes.DimDynamic
+			} else if crossSize != shapes.DimDynamic {
+				crossSize *= dim
+			}
 			crossDims = append(crossDims, dim)
 		case 1: // Contracting axes
-			contractingSize *= dim
+			if dim == shapes.DimDynamic {
+				contractingSize = shapes.DimDynamic
+			} else if contractingSize != shapes.DimDynamic {
+				contractingSize *= dim
+			}
 		case 2: // Batch axes
-			batchSize *= dim
+			if dim == shapes.DimDynamic {
+				batchSize = shapes.DimDynamic
+			} else if batchSize != shapes.DimDynamic {
+				batchSize *= dim
+			}
 		}
 	}
 	return
@@ -282,7 +358,27 @@ const (
 // dgSelectExecPath selects the execution path based on problem size and backend configuration.
 // Called at graph-build time from DotGeneral().
 func dgSelectExecPath(backend *Backend, lhsShape, rhsShape shapes.Shape, params *dotGeneralNodeData) dotGeneralExecutionPath {
+	return dgSelectExecPathWithSizes(backend, lhsShape, rhsShape, params,
+		params.batchSize, params.lhsCrossSize, params.rhsCrossSize, params.contractingSize)
+}
+
+// dgSelectExecPathWithSizes selects the execution path using explicitly provided sizes.
+// This is useful for specialization when the sizes in params may contain DimDynamic (-1)
+// but we have concrete sizes from resolved shapes.
+func dgSelectExecPathWithSizes(backend *Backend, lhsShape, rhsShape shapes.Shape, params *dotGeneralNodeData,
+	batchSize, lhsCrossSize, rhsCrossSize, contractingSize int) dotGeneralExecutionPath {
 	dtype := lhsShape.DType
+
+	// If any size is DimDynamic, we can't make informed decisions about algorithm selection.
+	// Default to normalizedPath which is safe for all sizes and will work correctly.
+	// At execution time with dynamic shapes, specialization will re-select with concrete sizes.
+	hasDynamic := batchSize == shapes.DimDynamic ||
+		lhsCrossSize == shapes.DimDynamic ||
+		rhsCrossSize == shapes.DimDynamic ||
+		contractingSize == shapes.DimDynamic
+	if hasDynamic {
+		return normalizedPath
+	}
 
 	// If a specific path is forced via backend config, use that.
 	if backend.dotGeneralForceExecutionPath != autoSelectPath {
@@ -306,7 +402,8 @@ func dgSelectExecPath(backend *Backend, lhsShape, rhsShape shapes.Shape, params 
 
 	// Check for SmallMatMul fast path first.
 	// SmallMatMul is beneficial for small float32 matrices in standard [M,K]×[K,N] order.
-	if dgUseSmallMatMul(dtype, lhsShape, rhsShape, params) {
+	if dgUseSmallMatMulWithSizes(dtype, lhsShape, rhsShape, params,
+		batchSize, lhsCrossSize, rhsCrossSize, contractingSize) {
 		return smallMatMulPath
 	}
 
@@ -318,7 +415,7 @@ func dgSelectExecPath(backend *Backend, lhsShape, rhsShape shapes.Shape, params 
 
 	// Default selection based on problem size.
 	// For large matrices, the blocked path with cache-tiled algorithm is more efficient.
-	crossesSize := params.rhsCrossSize * params.lhsCrossSize
+	crossesSize := rhsCrossSize * lhsCrossSize
 	blockDim := 1 << DotGeneralTargetBlockLog2Dim[dtype]
 	blockSize := blockDim * blockDim
 	if crossesSize > DotGeneralBlockedPathThreshold*blockSize {
