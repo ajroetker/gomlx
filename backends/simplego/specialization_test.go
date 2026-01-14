@@ -920,3 +920,335 @@ func TestNodeDataSignature(t *testing.T) {
 	require.Equal(t, sig7, sig8, "same dotGeneralNodeData should produce same signature")
 	require.NotEqual(t, sig7, sig9, "different dotGeneralNodeData should produce different signature")
 }
+
+// ============================================================================
+// Tests for various operations with dynamic shapes
+// ============================================================================
+
+func TestDynamicShapeReduceSum(t *testing.T) {
+	// Test ReduceSum with dynamic batch dimension
+	builder := backend.Builder("test_dynamic_reduce_sum")
+	mainFn := builder.Main()
+
+	// [batch, 4] -> reduce along axis 1 -> [batch]
+	x, err := mainFn.Parameter("x", shapes.MakeDynamic(dtypes.Float32, "batch", 4), nil)
+	require.NoError(t, err)
+
+	// Sum along axis 1
+	y, err := mainFn.ReduceSum(x, 1)
+	require.NoError(t, err)
+
+	err = mainFn.Return([]backends.Value{y}, nil)
+	require.NoError(t, err)
+
+	exec, err := builder.Compile()
+	require.NoError(t, err)
+
+	// Execute with batch=3
+	input, err := backend.BufferFromFlatData(0, []float32{
+		1, 2, 3, 4, // row 0: sum = 10
+		5, 6, 7, 8, // row 1: sum = 26
+		9, 10, 11, 12, // row 2: sum = 42
+	}, shapes.Make(dtypes.Float32, 3, 4))
+	require.NoError(t, err)
+
+	outputs, err := exec.Execute([]backends.Buffer{input}, nil, 0)
+	require.NoError(t, err)
+	require.Len(t, outputs, 1)
+
+	// Verify output shape [3]
+	outputShape, err := backend.BufferShape(outputs[0])
+	require.NoError(t, err)
+	require.Equal(t, []int{3}, outputShape.Dimensions)
+
+	// Verify values
+	outputData := outputs[0].(*Buffer).flat.([]float32)
+	require.Equal(t, []float32{10, 26, 42}, outputData)
+
+	// Execute with batch=2
+	input2, err := backend.BufferFromFlatData(0, []float32{
+		1, 1, 1, 1, // sum = 4
+		2, 2, 2, 2, // sum = 8
+	}, shapes.Make(dtypes.Float32, 2, 4))
+	require.NoError(t, err)
+
+	outputs2, err := exec.Execute([]backends.Buffer{input2}, nil, 0)
+	require.NoError(t, err)
+
+	outputShape2, err := backend.BufferShape(outputs2[0])
+	require.NoError(t, err)
+	require.Equal(t, []int{2}, outputShape2.Dimensions)
+
+	outputData2 := outputs2[0].(*Buffer).flat.([]float32)
+	require.Equal(t, []float32{4, 8}, outputData2)
+}
+
+func TestDynamicShapeReduceMax(t *testing.T) {
+	// Test ReduceMax with dynamic batch dimension
+	builder := backend.Builder("test_dynamic_reduce_max")
+	mainFn := builder.Main()
+
+	// [batch, 4] -> reduce along axis 1 -> [batch]
+	x, err := mainFn.Parameter("x", shapes.MakeDynamic(dtypes.Float32, "batch", 4), nil)
+	require.NoError(t, err)
+
+	y, err := mainFn.ReduceMax(x, 1)
+	require.NoError(t, err)
+
+	err = mainFn.Return([]backends.Value{y}, nil)
+	require.NoError(t, err)
+
+	exec, err := builder.Compile()
+	require.NoError(t, err)
+
+	// Execute with batch=2
+	input, err := backend.BufferFromFlatData(0, []float32{
+		1, 5, 3, 2, // max = 5
+		9, 6, 7, 8, // max = 9
+	}, shapes.Make(dtypes.Float32, 2, 4))
+	require.NoError(t, err)
+
+	outputs, err := exec.Execute([]backends.Buffer{input}, nil, 0)
+	require.NoError(t, err)
+
+	outputData := outputs[0].(*Buffer).flat.([]float32)
+	require.Equal(t, []float32{5, 9}, outputData)
+}
+
+func TestDynamicShapeConcatenate(t *testing.T) {
+	// Test Concatenate with dynamic batch dimension
+	builder := backend.Builder("test_dynamic_concatenate")
+	mainFn := builder.Main()
+
+	// Concatenate two [batch, 2] tensors along axis 1 -> [batch, 4]
+	a, err := mainFn.Parameter("a", shapes.MakeDynamic(dtypes.Float32, "batch", 2), nil)
+	require.NoError(t, err)
+
+	b, err := mainFn.Parameter("b", shapes.MakeDynamic(dtypes.Float32, "batch", 2), nil)
+	require.NoError(t, err)
+
+	y, err := mainFn.Concatenate(1, a, b)
+	require.NoError(t, err)
+
+	err = mainFn.Return([]backends.Value{y}, nil)
+	require.NoError(t, err)
+
+	exec, err := builder.Compile()
+	require.NoError(t, err)
+
+	// Execute with batch=2
+	inputA, err := backend.BufferFromFlatData(0, []float32{1, 2, 3, 4}, shapes.Make(dtypes.Float32, 2, 2))
+	require.NoError(t, err)
+	inputB, err := backend.BufferFromFlatData(0, []float32{5, 6, 7, 8}, shapes.Make(dtypes.Float32, 2, 2))
+	require.NoError(t, err)
+
+	outputs, err := exec.Execute([]backends.Buffer{inputA, inputB}, nil, 0)
+	require.NoError(t, err)
+
+	// Verify output shape [2, 4]
+	outputShape, err := backend.BufferShape(outputs[0])
+	require.NoError(t, err)
+	require.Equal(t, []int{2, 4}, outputShape.Dimensions)
+
+	// Verify values: [[1,2,5,6], [3,4,7,8]]
+	outputData := outputs[0].(*Buffer).flat.([]float32)
+	require.Equal(t, []float32{1, 2, 5, 6, 3, 4, 7, 8}, outputData)
+
+	// Execute with batch=3
+	inputA2, err := backend.BufferFromFlatData(0, []float32{1, 2, 3, 4, 5, 6}, shapes.Make(dtypes.Float32, 3, 2))
+	require.NoError(t, err)
+	inputB2, err := backend.BufferFromFlatData(0, []float32{10, 20, 30, 40, 50, 60}, shapes.Make(dtypes.Float32, 3, 2))
+	require.NoError(t, err)
+
+	outputs2, err := exec.Execute([]backends.Buffer{inputA2, inputB2}, nil, 0)
+	require.NoError(t, err)
+
+	outputShape2, err := backend.BufferShape(outputs2[0])
+	require.NoError(t, err)
+	require.Equal(t, []int{3, 4}, outputShape2.Dimensions)
+}
+
+func TestDynamicShapeTranspose(t *testing.T) {
+	// Test Transpose with dynamic batch dimension
+	builder := backend.Builder("test_dynamic_transpose")
+	mainFn := builder.Main()
+
+	// [batch, 3, 2] -> transpose (0, 2, 1) -> [batch, 2, 3]
+	x, err := mainFn.Parameter("x", shapes.MakeDynamic(dtypes.Float32, "batch", 3, 2), nil)
+	require.NoError(t, err)
+
+	y, err := mainFn.Transpose(x, 0, 2, 1)
+	require.NoError(t, err)
+
+	err = mainFn.Return([]backends.Value{y}, nil)
+	require.NoError(t, err)
+
+	exec, err := builder.Compile()
+	require.NoError(t, err)
+
+	// Execute with batch=2
+	// Input shape [2, 3, 2]:
+	// batch 0: [[1,2], [3,4], [5,6]]
+	// batch 1: [[7,8], [9,10], [11,12]]
+	input, err := backend.BufferFromFlatData(0, []float32{
+		1, 2, 3, 4, 5, 6,
+		7, 8, 9, 10, 11, 12,
+	}, shapes.Make(dtypes.Float32, 2, 3, 2))
+	require.NoError(t, err)
+
+	outputs, err := exec.Execute([]backends.Buffer{input}, nil, 0)
+	require.NoError(t, err)
+
+	// Verify output shape [2, 2, 3]
+	outputShape, err := backend.BufferShape(outputs[0])
+	require.NoError(t, err)
+	require.Equal(t, []int{2, 2, 3}, outputShape.Dimensions)
+
+	// After transpose (0, 2, 1):
+	// batch 0: [[1,3,5], [2,4,6]]
+	// batch 1: [[7,9,11], [8,10,12]]
+	outputData := outputs[0].(*Buffer).flat.([]float32)
+	require.Equal(t, []float32{
+		1, 3, 5, 2, 4, 6,
+		7, 9, 11, 8, 10, 12,
+	}, outputData)
+}
+
+func TestDynamicShapeSlice(t *testing.T) {
+	// Test Slice with dynamic batch dimension
+	builder := backend.Builder("test_dynamic_slice")
+	mainFn := builder.Main()
+
+	// [batch, 6] -> slice [0:batch, 1:4] -> [batch, 3]
+	x, err := mainFn.Parameter("x", shapes.MakeDynamic(dtypes.Float32, "batch", 6), nil)
+	require.NoError(t, err)
+
+	// Slice: keep all of batch dim, take indices 1:4 of the second dim
+	y, err := mainFn.Slice(x,
+		[]int{0, 1},  // starts
+		[]int{-1, 4}, // limits (-1 means full extent for dynamic dim)
+		[]int{1, 1},  // strides
+	)
+	require.NoError(t, err)
+
+	err = mainFn.Return([]backends.Value{y}, nil)
+	require.NoError(t, err)
+
+	exec, err := builder.Compile()
+	require.NoError(t, err)
+
+	// Execute with batch=2
+	input, err := backend.BufferFromFlatData(0, []float32{
+		0, 1, 2, 3, 4, 5, // slice [1:4] -> [1, 2, 3]
+		10, 11, 12, 13, 14, 15, // slice [1:4] -> [11, 12, 13]
+	}, shapes.Make(dtypes.Float32, 2, 6))
+	require.NoError(t, err)
+
+	outputs, err := exec.Execute([]backends.Buffer{input}, nil, 0)
+	require.NoError(t, err)
+
+	// Verify output shape [2, 3]
+	outputShape, err := backend.BufferShape(outputs[0])
+	require.NoError(t, err)
+	require.Equal(t, []int{2, 3}, outputShape.Dimensions)
+
+	outputData := outputs[0].(*Buffer).flat.([]float32)
+	require.Equal(t, []float32{1, 2, 3, 11, 12, 13}, outputData)
+}
+
+func TestDynamicShapeBroadcast(t *testing.T) {
+	// Test Broadcast with dynamic batch dimension
+	builder := backend.Builder("test_dynamic_broadcast")
+	mainFn := builder.Main()
+
+	// Broadcast a [1, 4] constant to [batch, 4] using element-wise multiply
+	// with a [batch, 4] input
+	x, err := mainFn.Parameter("x", shapes.MakeDynamic(dtypes.Float32, "batch", 4), nil)
+	require.NoError(t, err)
+
+	// Create a [1, 4] constant that will broadcast
+	scale, err := mainFn.Constant([]float32{1, 2, 3, 4}, 1, 4)
+	require.NoError(t, err)
+
+	// Multiply broadcasts [1, 4] to [batch, 4]
+	y, err := mainFn.Mul(x, scale)
+	require.NoError(t, err)
+
+	err = mainFn.Return([]backends.Value{y}, nil)
+	require.NoError(t, err)
+
+	exec, err := builder.Compile()
+	require.NoError(t, err)
+
+	// Execute with batch=3
+	input, err := backend.BufferFromFlatData(0, []float32{
+		1, 1, 1, 1, // * [1,2,3,4] = [1,2,3,4]
+		2, 2, 2, 2, // * [1,2,3,4] = [2,4,6,8]
+		3, 3, 3, 3, // * [1,2,3,4] = [3,6,9,12]
+	}, shapes.Make(dtypes.Float32, 3, 4))
+	require.NoError(t, err)
+
+	outputs, err := exec.Execute([]backends.Buffer{input}, nil, 0)
+	require.NoError(t, err)
+
+	outputShape, err := backend.BufferShape(outputs[0])
+	require.NoError(t, err)
+	require.Equal(t, []int{3, 4}, outputShape.Dimensions)
+
+	outputData := outputs[0].(*Buffer).flat.([]float32)
+	require.Equal(t, []float32{
+		1, 2, 3, 4,
+		2, 4, 6, 8,
+		3, 6, 9, 12,
+	}, outputData)
+}
+
+func TestDynamicShapeWhere(t *testing.T) {
+	// Test Where (select) with dynamic batch dimension
+	builder := backend.Builder("test_dynamic_where")
+	mainFn := builder.Main()
+
+	// Where: select from a or b based on condition
+	// All have shape [batch, 4]
+	cond, err := mainFn.Parameter("cond", shapes.MakeDynamic(dtypes.Bool, "batch", 4), nil)
+	require.NoError(t, err)
+
+	a, err := mainFn.Parameter("a", shapes.MakeDynamic(dtypes.Float32, "batch", 4), nil)
+	require.NoError(t, err)
+
+	b, err := mainFn.Parameter("b", shapes.MakeDynamic(dtypes.Float32, "batch", 4), nil)
+	require.NoError(t, err)
+
+	y, err := mainFn.Where(cond, a, b)
+	require.NoError(t, err)
+
+	err = mainFn.Return([]backends.Value{y}, nil)
+	require.NoError(t, err)
+
+	exec, err := builder.Compile()
+	require.NoError(t, err)
+
+	// Execute with batch=2
+	condData := []bool{true, false, true, false, false, true, false, true}
+	inputCond, err := backend.BufferFromFlatData(0, condData, shapes.Make(dtypes.Bool, 2, 4))
+	require.NoError(t, err)
+
+	inputA, err := backend.BufferFromFlatData(0, []float32{1, 2, 3, 4, 5, 6, 7, 8}, shapes.Make(dtypes.Float32, 2, 4))
+	require.NoError(t, err)
+
+	inputB, err := backend.BufferFromFlatData(0, []float32{10, 20, 30, 40, 50, 60, 70, 80}, shapes.Make(dtypes.Float32, 2, 4))
+	require.NoError(t, err)
+
+	outputs, err := exec.Execute([]backends.Buffer{inputCond, inputA, inputB}, nil, 0)
+	require.NoError(t, err)
+
+	outputShape, err := backend.BufferShape(outputs[0])
+	require.NoError(t, err)
+	require.Equal(t, []int{2, 4}, outputShape.Dimensions)
+
+	// Where cond=true, select from a; where cond=false, select from b
+	// Row 0: [T,F,T,F] -> [1, 20, 3, 40]
+	// Row 1: [F,T,F,T] -> [50, 6, 70, 8]
+	outputData := outputs[0].(*Buffer).flat.([]float32)
+	require.Equal(t, []float32{1, 20, 3, 40, 50, 6, 70, 8}, outputData)
+}
