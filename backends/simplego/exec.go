@@ -3,6 +3,8 @@
 package simplego
 
 import (
+	"sync"
+
 	"github.com/pkg/errors"
 
 	"github.com/gomlx/gomlx/backends"
@@ -24,6 +26,21 @@ type Executable struct {
 
 	// mainFn is the compiled main function.
 	mainFn *FunctionExecutable
+
+	// Dynamic shape support: when inputs have named axes (e.g., "batch"),
+	// we create specializations for each unique binding at execution time.
+
+	// hasDynamicAxes is true if any input parameter has named axes.
+	hasDynamicAxes bool
+
+	// inputPatterns stores the pattern shapes (with named axes) for each input.
+	// Used to extract bindings from concrete input shapes.
+	inputPatterns []shapes.Shape
+
+	// specializations caches ShapeSpecialization by bindings key.
+	// Key: bindings.Key() (e.g., "batch=32,seq=128")
+	// Value: *ShapeSpecialization
+	specializations sync.Map
 }
 
 // Compile time check.
@@ -75,11 +92,29 @@ func (e *Executable) Outputs() (outputShapes []shapes.Shape) {
 // The main function must have been compiled (via Return() and then any
 // duplicate output handling in Builder.Compile()).
 func newExecutable(builder *Builder, mainFn *FunctionExecutable) *Executable {
-	return &Executable{
+	e := &Executable{
 		backend: builder.backend,
 		builder: builder,
 		mainFn:  mainFn,
 	}
+
+	// Check if any input has named axes (dynamic shapes).
+	for _, inputNode := range builder.inputs {
+		if inputNode.shape.HasNamedAxes() {
+			e.hasDynamicAxes = true
+			break
+		}
+	}
+
+	// Store input patterns for binding extraction if we have dynamic axes.
+	if e.hasDynamicAxes {
+		e.inputPatterns = make([]shapes.Shape, len(builder.inputs))
+		for i, inputNode := range builder.inputs {
+			e.inputPatterns[i] = inputNode.shape.Clone()
+		}
+	}
+
+	return e
 }
 
 // nodeExecutor for the given operation type.
@@ -138,6 +173,10 @@ const (
 // Execute the executable on the default device (0).
 // The number and shapes of the inputs must match those returned by Inputs.
 //
+// For graphs with dynamic shapes (named axes like "batch"), the input shapes
+// must match the pattern (dtype, rank, static dimensions) and bindings are
+// extracted at execution time.
+//
 // The inputs marked in `donate` will become invalid after use.
 // This is useful if the input buffer is no longer needed or if updating a variable
 // so its Buffer space can be reused as an output Buffer.
@@ -161,6 +200,8 @@ func (e *Executable) Execute(inputs []backends.Buffer, donate []bool, _ backends
 
 	// Check input shapes and convert to *Buffer
 	bufInputs := make([]*Buffer, len(inputs))
+	var bindings shapes.AxisBindings
+
 	for ii, input := range inputs {
 		if input == nil {
 			return nil, errors.Errorf("Execute: input buffer #%d is nil!?", ii)
@@ -177,14 +218,39 @@ func (e *Executable) Execute(inputs []backends.Buffer, donate []bool, _ backends
 		if inputBuffer.flat == nil {
 			return nil, errors.Errorf("Execute: input buffer #%d flat data is set to nil (!?)", ii)
 		}
+
 		nodeInput := e.builder.inputs[ii]
-		if !inputBuffer.shape.Equal(nodeInput.shape) {
-			paramName := nodeInput.data.(*nodeParameter).name
-			return nil, errors.Errorf("Execute: parameter %q (input #%d) for %q: expected shape %s, got %s",
-				paramName, ii, e.builder.name, nodeInput.shape, inputBuffer.shape)
+		paramName := nodeInput.data.(*nodeParameter).name
+
+		if e.hasDynamicAxes {
+			// For dynamic shapes: extract bindings from concrete input shape
+			inputBindings, err := shapes.ExtractBindings(e.inputPatterns[ii], inputBuffer.shape)
+			if err != nil {
+				return nil, errors.Errorf("Execute: parameter %q (input #%d) for %q: shape mismatch: %v",
+					paramName, ii, e.builder.name, err)
+			}
+			if bindings == nil {
+				bindings = inputBindings
+			} else if err := bindings.Merge(inputBindings); err != nil {
+				return nil, errors.Errorf("Execute: conflicting axis bindings for parameter %q (input #%d): %v",
+					paramName, ii, err)
+			}
+		} else {
+			// For static shapes: require exact match
+			if !inputBuffer.shape.Equal(nodeInput.shape) {
+				return nil, errors.Errorf("Execute: parameter %q (input #%d) for %q: expected shape %s, got %s",
+					paramName, ii, e.builder.name, nodeInput.shape, inputBuffer.shape)
+			}
 		}
 		bufInputs[ii] = inputBuffer
 	}
+
+	// Get or create specialization if we have dynamic axes
+	var spec *ShapeSpecialization
+	if e.hasDynamicAxes {
+		spec = e.getOrCreateSpecialization(bindings)
+	}
+	_ = spec // TODO: use specialization in execution
 
 	// Delegate to FunctionExecutable
 	outputs, err := e.mainFn.Execute(e.backend, bufInputs, donate)
@@ -198,4 +264,22 @@ func (e *Executable) Execute(inputs []backends.Buffer, donate []bool, _ backends
 		result[i] = out
 	}
 	return result, nil
+}
+
+// getOrCreateSpecialization returns a cached specialization for the given bindings,
+// creating one if it doesn't exist.
+func (e *Executable) getOrCreateSpecialization(bindings shapes.AxisBindings) *ShapeSpecialization {
+	key := bindings.Key()
+
+	// Try to load existing specialization
+	if cached, ok := e.specializations.Load(key); ok {
+		return cached.(*ShapeSpecialization)
+	}
+
+	// Create new specialization
+	spec := newSpecialization(e.builder, bindings)
+
+	// Store and return (LoadOrStore handles race condition)
+	actual, _ := e.specializations.LoadOrStore(key, spec)
+	return actual.(*ShapeSpecialization)
 }
