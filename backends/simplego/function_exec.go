@@ -7,6 +7,7 @@ import (
 	"sync/atomic"
 
 	"github.com/gomlx/gomlx/backends"
+	"github.com/gomlx/gomlx/pkg/core/dtypes"
 	"github.com/gomlx/gomlx/pkg/core/shapes"
 	"github.com/pkg/errors"
 )
@@ -124,12 +125,61 @@ type funcExecBuffers struct {
 	// when executing graphs with dynamic axes.
 	opParams []any
 
+	// bufferPool is the specialization-specific buffer pool for this execution.
+	// If nil, uses the global backend pools. When set, buffer allocations and
+	// returns will prefer this pool for exact-sized buffers.
+	bufferPool *ShapeSpecificPool
+
 	// Sequential execution-only: reused for each op.
 	opInputBuffers []*Buffer
 	opInputsOwned  []bool
 
 	// Parallel execution only: protects shared state.
 	mu sync.Mutex
+}
+
+// getBuffer allocates a buffer, preferring the specialization pool if available.
+// Falls back to the global backend pool if the specialization pool doesn't have a matching pool.
+func (eb *funcExecBuffers) getBuffer(backend *Backend, dtype dtypes.DType, length int) *Buffer {
+	if eb.bufferPool != nil {
+		if buf := eb.bufferPool.getBuffer(dtype, length); buf != nil {
+			return buf
+		}
+	}
+	return backend.getBuffer(dtype, length)
+}
+
+// getBufferForShape allocates a buffer with the given shape, preferring the specialization pool.
+func (eb *funcExecBuffers) getBufferForShape(backend *Backend, shape shapes.Shape) *Buffer {
+	buf := eb.getBuffer(backend, shape.DType, shape.Size())
+	if buf != nil {
+		buf.shape = shape
+	}
+	return buf
+}
+
+// putBuffer returns a buffer to its pool. If the buffer's size matches a specialization pool,
+// it goes there; otherwise it goes to the global backend pool.
+func (eb *funcExecBuffers) putBuffer(backend *Backend, buffer *Buffer) {
+	if buffer == nil || !buffer.shape.Ok() {
+		return
+	}
+	if eb.bufferPool != nil && eb.bufferPool.hasPool(buffer.shape.DType, buffer.shape.Size()) {
+		eb.bufferPool.putBuffer(buffer)
+		return
+	}
+	backend.putBuffer(buffer)
+}
+
+// cloneBuffer creates a copy of the buffer using the appropriate pool.
+func (eb *funcExecBuffers) cloneBuffer(backend *Backend, buffer *Buffer) *Buffer {
+	if buffer == nil || buffer.flat == nil || !buffer.shape.Ok() || !buffer.valid {
+		return backend.cloneBuffer(buffer) // Let backend handle the error case
+	}
+	newBuffer := eb.getBuffer(backend, buffer.shape.DType, buffer.shape.Size())
+	newBuffer.shape = buffer.shape.Clone()
+	copyFlat(newBuffer.flat, buffer.flat)
+	return newBuffer
 }
 
 // Execute runs the compiled function with the given inputs.
@@ -157,13 +207,15 @@ func (fe *FunctionExecutable) Execute(backend *Backend, inputs []*Buffer, donate
 		execBuf.remainingDeps[i] = 0
 	}
 
-	// Set resolved shapes and operation params from specialization if available
+	// Set resolved shapes, operation params, and buffer pool from specialization if available
 	if spec != nil {
 		execBuf.nodeShapes = spec.nodeShapes
 		execBuf.opParams = spec.opParams
+		execBuf.bufferPool = spec.bufferPool
 	} else {
 		execBuf.nodeShapes = nil
 		execBuf.opParams = nil
+		execBuf.bufferPool = nil
 	}
 
 	// Set up parameters from inputs using builderIdx directly
@@ -207,7 +259,7 @@ func (fe *FunctionExecutable) Execute(backend *Backend, inputs []*Buffer, donate
 		}
 		if !execBuf.owned[outIdx] {
 			// Clone the buffer since we don't own it
-			outputs[i] = backend.cloneBuffer(execBuf.results[outIdx])
+			outputs[i] = execBuf.cloneBuffer(backend, execBuf.results[outIdx])
 		}
 		execBuf.results[outIdx] = nil // Prevent double-free
 	}
@@ -215,7 +267,7 @@ func (fe *FunctionExecutable) Execute(backend *Backend, inputs []*Buffer, donate
 	// Free any remaining owned buffers that weren't outputs
 	for idx, buf := range execBuf.results {
 		if buf != nil && execBuf.owned[idx] {
-			backend.putBuffer(buf)
+			execBuf.putBuffer(backend, buf)
 		}
 	}
 
@@ -435,7 +487,7 @@ func (fe *FunctionExecutable) executeNode(backend *Backend, node *Node, execBuf 
 			outputNode := node.multiOutputsNodes[outputIdx]
 			outputNodeIdx := outputNode.builderIdx
 			if outputNodeIdx >= fe.numNodesToProcess || fe.numUses[outputNodeIdx] == 0 {
-				backend.putBuffer(outputBuf)
+				execBuf.putBuffer(backend, outputBuf)
 				continue
 			}
 			execBuf.results[outputNodeIdx] = outputBuf
@@ -469,7 +521,7 @@ func (fe *FunctionExecutable) executeNode(backend *Backend, node *Node, execBuf 
 		}
 		if int(newCount) == fe.numUses[inputIdx] && execBuf.owned[inputIdx] {
 			// Release the input buffer - all users have finished.
-			backend.putBuffer(inputBuffers[i])
+			execBuf.putBuffer(backend, inputBuffers[i])
 			execBuf.results[inputIdx] = nil
 		}
 	}

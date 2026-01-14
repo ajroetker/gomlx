@@ -563,3 +563,91 @@ func TestDynamicShapeWithIota(t *testing.T) {
 		51, 61, 71, 81,
 	}, outputData2)
 }
+
+func TestBufferPoolIntegration(t *testing.T) {
+	// Test that funcExecBuffers helper methods correctly use the specialization pool.
+	// This tests the getBuffer, putBuffer, and cloneBuffer methods on funcExecBuffers.
+
+	be := backend.(*Backend)
+
+	// Create a specialization with known shapes
+	builder := backend.Builder("test_buffer_pool_integration").(*Builder)
+	mainFn := builder.Main()
+
+	x, err := mainFn.Parameter("x", shapes.MakeDynamic(dtypes.Float32, "batch", 4), nil)
+	require.NoError(t, err)
+
+	y, err := mainFn.Neg(x)
+	require.NoError(t, err)
+
+	err = mainFn.Return([]backends.Value{y}, nil)
+	require.NoError(t, err)
+
+	_, err = builder.Compile()
+	require.NoError(t, err)
+
+	// Create specialization
+	bindings := shapes.AxisBindings{"batch": 8}
+	spec := newSpecialization(builder, bindings)
+
+	// Create a funcExecBuffers with the specialization pool
+	execBuf := &funcExecBuffers{
+		bufferPool: spec.bufferPool,
+	}
+
+	// Test getBuffer - should get from specialization pool
+	buf := execBuf.getBuffer(be, dtypes.Float32, 32) // 8*4 = 32
+	require.NotNil(t, buf)
+	require.True(t, buf.valid)
+
+	// Mark buffer for pool return tracking
+	buf.shape = shapes.Make(dtypes.Float32, 8, 4)
+
+	// Test putBuffer - should return to specialization pool
+	execBuf.putBuffer(be, buf)
+	require.False(t, buf.valid) // Should be invalidated
+
+	// Get another buffer - should get the same one back from pool
+	buf2 := execBuf.getBuffer(be, dtypes.Float32, 32)
+	require.Same(t, buf, buf2, "should reuse pooled buffer")
+
+	// Test getBuffer with unknown size - should fall back to backend pool
+	buf3 := execBuf.getBuffer(be, dtypes.Float32, 999)
+	require.NotNil(t, buf3)
+	buf3.shape = shapes.Make(dtypes.Float32, 999)
+
+	// Test putBuffer for unknown size - should go to backend pool
+	execBuf.putBuffer(be, buf3)
+	require.False(t, buf3.valid)
+
+	// Test cloneBuffer
+	srcBuf := execBuf.getBuffer(be, dtypes.Float32, 32)
+	srcBuf.shape = shapes.Make(dtypes.Float32, 8, 4)
+	srcFlat := srcBuf.flat.([]float32)
+	for i := range srcFlat {
+		srcFlat[i] = float32(i)
+	}
+
+	clonedBuf := execBuf.cloneBuffer(be, srcBuf)
+	require.NotNil(t, clonedBuf)
+	require.NotSame(t, srcBuf, clonedBuf)
+	require.Equal(t, srcBuf.shape, clonedBuf.shape)
+
+	// Verify the data was copied
+	clonedFlat := clonedBuf.flat.([]float32)
+	require.Equal(t, srcFlat, clonedFlat)
+
+	// Clean up
+	execBuf.putBuffer(be, srcBuf)
+	execBuf.putBuffer(be, clonedBuf)
+
+	// Test with nil bufferPool (should fall back to backend pool)
+	execBufNoPool := &funcExecBuffers{
+		bufferPool: nil,
+	}
+
+	buf4 := execBufNoPool.getBuffer(be, dtypes.Float32, 32)
+	require.NotNil(t, buf4)
+	buf4.shape = shapes.Make(dtypes.Float32, 32)
+	execBufNoPool.putBuffer(be, buf4)
+}
