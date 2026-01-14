@@ -30,8 +30,13 @@ require (
 require (
 	github.com/aymanbagabas/go-udiff v0.3.1 // indirect
 	github.com/charmbracelet/x/exp/golden v0.0.0-20241011142426-46044092ad91 // indirect
+	github.com/gomlx/tokenizers v0.0.0-20240824032737-1de48c6f6440 // indirect
 	github.com/kr/pretty v0.3.1 // indirect
+	github.com/magefile/mage v1.15.0 // indirect
 	github.com/rogpeppe/go-internal v1.14.1 // indirect
+	github.com/schollz/progressbar/v2 v2.15.0 // indirect
+	github.com/sugarme/regexpset v0.0.0-20200920021344-4d4ec8eaf93c // indirect
+	github.com/sugarme/tokenizer v0.3.0 // indirect
 )
 
 require (
