@@ -3,6 +3,7 @@
 package simplego
 
 import (
+	"fmt"
 	"reflect"
 	"sync"
 
@@ -30,6 +31,12 @@ type ShapeSpecialization struct {
 	// Indexed by node.builderIdx. Nil for nodes that don't need specialized params.
 	// Currently used for DotGeneral to store algorithm selection based on concrete shapes.
 	opParams []any
+
+	// canonical maps each node index to the "canonical" node that computes the same result.
+	// If canonical[i] == i, this node is the canonical version (first occurrence).
+	// If canonical[i] != i, this node's result should be reused from canonical[i].
+	// This enables runtime deduplication of nodes that became identical after shape resolution.
+	canonical []int
 }
 
 // DotGeneralSpecParams holds pre-computed parameters for DotGeneral operations.
@@ -161,6 +168,9 @@ func newSpecialization(builder *Builder, bindings shapes.AxisBindings) *ShapeSpe
 	// Pre-compute operation-specific parameters (e.g., DotGeneral algorithm selection)
 	spec.computeOpParams(builder)
 
+	// Compute runtime deduplication mapping
+	spec.computeDeduplication(builder)
+
 	return spec
 }
 
@@ -215,4 +225,133 @@ func (s *ShapeSpecialization) NodeShape(builderIdx int) shapes.Shape {
 		return shapes.Invalid()
 	}
 	return s.nodeShapes[builderIdx]
+}
+
+// computeDeduplication computes the canonical mapping for runtime deduplication.
+// Nodes with identical signatures (opType, canonical inputs, data, concrete shape)
+// are deduplicated at specialization time. The first occurrence becomes canonical,
+// and subsequent identical nodes map to it.
+func (s *ShapeSpecialization) computeDeduplication(builder *Builder) {
+	numNodes := len(builder.nodes)
+	s.canonical = make([]int, numNodes)
+
+	// Map from signature to canonical node index
+	signatures := make(map[string]int)
+
+	// Process nodes in topological order (they're already in DAG order)
+	for nodeIdx, node := range builder.nodes {
+		// Parameters can't be deduplicated - they're inputs
+		if node.opType == backends.OpTypeParameter {
+			s.canonical[nodeIdx] = nodeIdx
+			continue
+		}
+
+		// Multi-output select nodes: deduplicate based on parent's canonical + output index
+		if node.isNodeSelectOutput {
+			parentIdx := node.inputs[0].builderIdx
+			canonicalParent := s.canonical[parentIdx]
+			sig := fmt.Sprintf("select:%d:%d", canonicalParent, node.selectOutputIdx)
+			if existingIdx, found := signatures[sig]; found {
+				s.canonical[nodeIdx] = existingIdx
+			} else {
+				s.canonical[nodeIdx] = nodeIdx
+				signatures[sig] = nodeIdx
+			}
+			continue
+		}
+
+		// Compute signature for regular nodes
+		sig := s.computeNodeSignature(builder, node, nodeIdx)
+
+		if existingIdx, found := signatures[sig]; found {
+			// This node duplicates an existing one
+			s.canonical[nodeIdx] = existingIdx
+		} else {
+			// This is the canonical version
+			s.canonical[nodeIdx] = nodeIdx
+			signatures[sig] = nodeIdx
+		}
+	}
+}
+
+// computeNodeSignature computes a unique signature for a node based on:
+// - opType
+// - Canonical indices of inputs (using canonical[] recursively)
+// - Node data (operation parameters)
+// - Concrete shape from nodeShapes[]
+func (s *ShapeSpecialization) computeNodeSignature(builder *Builder, node *Node, nodeIdx int) string {
+	// Start with opType
+	sig := fmt.Sprintf("%s:", node.opType)
+
+	// Add canonical input indices
+	sig += "inputs["
+	for i, input := range node.inputs {
+		if i > 0 {
+			sig += ","
+		}
+		sig += fmt.Sprintf("%d", s.canonical[input.builderIdx])
+	}
+	sig += "]"
+
+	// Add concrete shape
+	sig += fmt.Sprintf(":shape[%s]", s.nodeShapes[nodeIdx])
+
+	// Add data signature
+	sig += fmt.Sprintf(":data[%s]", nodeDataSignature(node.data))
+
+	return sig
+}
+
+// nodeDataSignature creates a string representation of node data for deduplication.
+// Uses the same comparison logic as compile-time deduplication where possible.
+func nodeDataSignature(data any) string {
+	if data == nil {
+		return "nil"
+	}
+
+	// Use type name as prefix
+	typ := reflect.TypeOf(data)
+	prefix := typ.String()
+
+	// Handle known types with meaningful representation
+	switch d := data.(type) {
+	case int:
+		return fmt.Sprintf("%s:%d", prefix, d)
+	case []int:
+		return fmt.Sprintf("%s:%v", prefix, d)
+	case *Buffer:
+		// For constants, use shape and data hash
+		return fmt.Sprintf("%s:%s:%v", prefix, d.shape, bufferHash(d))
+	case *dotGeneralNodeData:
+		return fmt.Sprintf("%s:lhsC%v:lhsB%v:rhsC%v:rhsB%v",
+			prefix,
+			d.lhsContractingAxes, d.lhsBatchAxes,
+			d.rhsContractingAxes, d.rhsBatchAxes)
+	case *convNode:
+		return fmt.Sprintf("%s:axes%v:strides%v:pad%v:inDil%v:kDil%v:chGrp%d:batchGrp%d",
+			prefix, d.axes, d.strides, d.paddings, d.inputDilations, d.kernelDilations,
+			d.channelGroupCount, d.batchGroupCount)
+	case nodeDataComparable:
+		// For types implementing nodeDataComparable, use reflection to get key fields
+		return fmt.Sprintf("%s:%v", prefix, reflect.ValueOf(data).Elem())
+	default:
+		// For other types, use %v which will show struct fields
+		return fmt.Sprintf("%s:%v", prefix, data)
+	}
+}
+
+// bufferHash creates a simple hash of buffer contents for deduplication.
+// This is used for constants to detect identical values.
+func bufferHash(b *Buffer) uint64 {
+	if b == nil || b.flat == nil {
+		return 0
+	}
+	// Simple FNV-like hash over the bytes
+	h := uint64(14695981039346656037)
+	bytes := b.mutableBytes()
+	for _, byte := range bytes {
+		h ^= uint64(byte)
+		h *= 1099511628211
+	}
+	return h
 }

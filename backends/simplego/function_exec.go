@@ -130,6 +130,11 @@ type funcExecBuffers struct {
 	// returns will prefer this pool for exact-sized buffers.
 	bufferPool *ShapeSpecificPool
 
+	// canonical maps each node index to its canonical node for runtime deduplication.
+	// If canonical[i] == i, execute the node. If canonical[i] != i, reuse the
+	// result from canonical[i]. Nil when no specialization or no deduplication.
+	canonical []int
+
 	// Sequential execution-only: reused for each op.
 	opInputBuffers []*Buffer
 	opInputsOwned  []bool
@@ -207,15 +212,17 @@ func (fe *FunctionExecutable) Execute(backend *Backend, inputs []*Buffer, donate
 		execBuf.remainingDeps[i] = 0
 	}
 
-	// Set resolved shapes, operation params, and buffer pool from specialization if available
+	// Set resolved shapes, operation params, buffer pool, and canonical mapping from specialization if available
 	if spec != nil {
 		execBuf.nodeShapes = spec.nodeShapes
 		execBuf.opParams = spec.opParams
 		execBuf.bufferPool = spec.bufferPool
+		execBuf.canonical = spec.canonical
 	} else {
 		execBuf.nodeShapes = nil
 		execBuf.opParams = nil
 		execBuf.bufferPool = nil
+		execBuf.canonical = nil
 	}
 
 	// Set up parameters from inputs using builderIdx directly
@@ -405,6 +412,14 @@ func (fe *FunctionExecutable) executeParallel(backend *Backend, execBuf *funcExe
 // executeNode executes a single node and stores its result.
 func (fe *FunctionExecutable) executeNode(backend *Backend, node *Node, execBuf *funcExecBuffers) error {
 	nodeIdx := node.builderIdx
+
+	// Check for runtime deduplication - if this node is deduplicated, reuse the canonical result
+	if execBuf.canonical != nil && execBuf.canonical[nodeIdx] != nodeIdx {
+		canonicalIdx := execBuf.canonical[nodeIdx]
+		execBuf.results[nodeIdx] = execBuf.results[canonicalIdx]
+		execBuf.owned[nodeIdx] = false // Don't own - it's shared with canonical
+		return nil
+	}
 
 	// Handle constants specially
 	if node.opType == backends.OpTypeConstant {

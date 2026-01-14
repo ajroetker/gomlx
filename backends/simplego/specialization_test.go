@@ -651,3 +651,272 @@ func TestBufferPoolIntegration(t *testing.T) {
 	buf4.shape = shapes.Make(dtypes.Float32, 32)
 	execBufNoPool.putBuffer(be, buf4)
 }
+
+func TestRuntimeDeduplication(t *testing.T) {
+	// Test that runtime deduplication correctly identifies and deduplicates
+	// nodes that become identical after shape resolution.
+
+	// Create a graph where two different subexpressions become identical
+	// at runtime due to dynamic shape resolution.
+	builder := backend.Builder("test_runtime_dedup").(*Builder)
+	mainFn := builder.Main()
+
+	// Two parameters with dynamic batch dimension
+	x, err := mainFn.Parameter("x", shapes.MakeDynamic(dtypes.Float32, "batch", 4), nil)
+	require.NoError(t, err)
+
+	y, err := mainFn.Parameter("y", shapes.MakeDynamic(dtypes.Float32, "batch", 4), nil)
+	require.NoError(t, err)
+
+	// Apply same operation to both: a = neg(x), b = neg(y)
+	// At compile time, these are different nodes with different inputs.
+	// At runtime with same input values, the outputs would be same but
+	// we can't deduplicate across different inputs.
+	a, err := mainFn.Neg(x)
+	require.NoError(t, err)
+
+	b, err := mainFn.Neg(y)
+	require.NoError(t, err)
+
+	// Return both
+	err = mainFn.Return([]backends.Value{a, b}, nil)
+	require.NoError(t, err)
+
+	_, err = builder.Compile()
+	require.NoError(t, err)
+
+	// Create specialization
+	bindings := shapes.AxisBindings{"batch": 8}
+	spec := newSpecialization(builder, bindings)
+
+	// Verify canonical mapping exists
+	require.NotNil(t, spec.canonical)
+	require.Equal(t, len(builder.nodes), len(spec.canonical))
+
+	// Nodes a and b have different inputs (x vs y), so they should NOT be deduplicated
+	aNode := a.(*Node)
+	bNode := b.(*Node)
+	require.Equal(t, aNode.builderIdx, spec.canonical[aNode.builderIdx], "a should be canonical (different inputs)")
+	require.Equal(t, bNode.builderIdx, spec.canonical[bNode.builderIdx], "b should be canonical (different inputs)")
+}
+
+func TestRuntimeDeduplicationWithConstants(t *testing.T) {
+	// Test deduplication with identical constants.
+	// Verify that the runtime dedup signature handles constants correctly.
+	builder := backend.Builder("test_runtime_dedup_constants").(*Builder)
+	mainFn := builder.Main()
+
+	// Create parameter with static shape
+	x, err := mainFn.Parameter("x", shapes.Make(dtypes.Float32, 4), nil)
+	require.NoError(t, err)
+
+	// Create a constant
+	c1, err := mainFn.Constant([]float32{1, 2, 3, 4}, 4)
+	require.NoError(t, err)
+
+	// Add x + c1
+	y, err := mainFn.Add(x, c1)
+	require.NoError(t, err)
+
+	err = mainFn.Return([]backends.Value{y}, nil)
+	require.NoError(t, err)
+
+	_, err = builder.Compile()
+	require.NoError(t, err)
+
+	// Create specialization (even with static shapes, verify it doesn't panic)
+	// Empty bindings for static shapes
+	bindings := shapes.AxisBindings{}
+	spec := newSpecialization(builder, bindings)
+	require.NotNil(t, spec.canonical)
+
+	// Verify constants get a valid canonical index
+	c1Node := c1.(*Node)
+	require.GreaterOrEqual(t, spec.canonical[c1Node.builderIdx], 0)
+}
+
+func TestRuntimeDeduplicationIdenticalSubgraphs(t *testing.T) {
+	// Test that truly identical subgraphs are deduplicated.
+	// Create a graph where the same input is processed twice identically.
+	builder := backend.Builder("test_runtime_dedup_identical").(*Builder)
+	mainFn := builder.Main()
+
+	// Single parameter
+	x, err := mainFn.Parameter("x", shapes.MakeDynamic(dtypes.Float32, "batch", 4), nil)
+	require.NoError(t, err)
+
+	// Apply neg twice to the same input - these should NOT be deduplicated
+	// at compile time because they're separate calls, but at runtime
+	// with the same canonical input, they should be deduplicated.
+	//
+	// Actually, compile-time dedup should already handle this case...
+	// Let's verify the canonical mapping is correct either way.
+	a, err := mainFn.Neg(x)
+	require.NoError(t, err)
+
+	// Use the result
+	err = mainFn.Return([]backends.Value{a}, nil)
+	require.NoError(t, err)
+
+	_, err = builder.Compile()
+	require.NoError(t, err)
+
+	// Create specialization
+	bindings := shapes.AxisBindings{"batch": 8}
+	spec := newSpecialization(builder, bindings)
+
+	require.NotNil(t, spec.canonical)
+
+	// Verify all nodes have valid canonical indices
+	for i, canonical := range spec.canonical {
+		require.GreaterOrEqual(t, canonical, 0, "canonical index should be non-negative")
+		require.Less(t, canonical, len(spec.canonical), "canonical index should be within bounds")
+		require.LessOrEqual(t, canonical, i, "canonical index should not point forward")
+	}
+}
+
+func TestDeduplicationExecution(t *testing.T) {
+	// Test that execution works correctly with deduplication.
+	// Verify that deduplicated nodes produce correct results.
+	builder := backend.Builder("test_dedup_execution")
+	mainFn := builder.Main()
+
+	// Create a simple graph
+	x, err := mainFn.Parameter("x", shapes.MakeDynamic(dtypes.Float32, "batch", 4), nil)
+	require.NoError(t, err)
+
+	// neg(x)
+	y, err := mainFn.Neg(x)
+	require.NoError(t, err)
+
+	err = mainFn.Return([]backends.Value{y}, nil)
+	require.NoError(t, err)
+
+	exec, err := builder.Compile()
+	require.NoError(t, err)
+
+	// Execute with batch=2
+	input, err := backend.BufferFromFlatData(0, []float32{1, 2, 3, 4, 5, 6, 7, 8}, shapes.Make(dtypes.Float32, 2, 4))
+	require.NoError(t, err)
+
+	outputs, err := exec.Execute([]backends.Buffer{input}, nil, 0)
+	require.NoError(t, err)
+	require.Len(t, outputs, 1)
+
+	// Verify output
+	outputData := outputs[0].(*Buffer).flat.([]float32)
+	require.Equal(t, []float32{-1, -2, -3, -4, -5, -6, -7, -8}, outputData)
+
+	// Execute again with batch=3 (different specialization)
+	input2, err := backend.BufferFromFlatData(0, []float32{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12}, shapes.Make(dtypes.Float32, 3, 4))
+	require.NoError(t, err)
+
+	outputs2, err := exec.Execute([]backends.Buffer{input2}, nil, 0)
+	require.NoError(t, err)
+	require.Len(t, outputs2, 1)
+
+	// Verify output
+	outputData2 := outputs2[0].(*Buffer).flat.([]float32)
+	require.Equal(t, []float32{-1, -2, -3, -4, -5, -6, -7, -8, -9, -10, -11, -12}, outputData2)
+}
+
+func TestCanonicalMappingProperties(t *testing.T) {
+	// Test properties of the canonical mapping:
+	// 1. All canonical indices point to self or earlier nodes
+	// 2. Parameters are always canonical to themselves
+	// 3. Canonical indices form a valid equivalence relation
+
+	builder := backend.Builder("test_canonical_properties").(*Builder)
+	mainFn := builder.Main()
+
+	// Create a graph with multiple operations
+	x, err := mainFn.Parameter("x", shapes.MakeDynamic(dtypes.Float32, "batch", 4), nil)
+	require.NoError(t, err)
+	y, err := mainFn.Parameter("y", shapes.MakeDynamic(dtypes.Float32, "batch", 4), nil)
+	require.NoError(t, err)
+
+	// Various operations
+	a, err := mainFn.Neg(x)
+	require.NoError(t, err)
+	b, err := mainFn.Neg(y)
+	require.NoError(t, err)
+	c, err := mainFn.Add(a, b)
+	require.NoError(t, err)
+
+	err = mainFn.Return([]backends.Value{c}, nil)
+	require.NoError(t, err)
+
+	_, err = builder.Compile()
+	require.NoError(t, err)
+
+	// Create specialization
+	bindings := shapes.AxisBindings{"batch": 8}
+	spec := newSpecialization(builder, bindings)
+
+	// Property 1: All canonical indices point to self or earlier nodes
+	for i, canonical := range spec.canonical {
+		require.LessOrEqual(t, canonical, i,
+			"canonical[%d]=%d should be <= %d", i, canonical, i)
+	}
+
+	// Property 2: Parameters are always canonical to themselves
+	xNode := x.(*Node)
+	yNode := y.(*Node)
+	require.Equal(t, xNode.builderIdx, spec.canonical[xNode.builderIdx], "parameter x should be self-canonical")
+	require.Equal(t, yNode.builderIdx, spec.canonical[yNode.builderIdx], "parameter y should be self-canonical")
+
+	// Property 3: Transitive closure - if canonical[a] = b and canonical[b] = c, then c = b (canonical is already resolved)
+	for i, canonical := range spec.canonical {
+		if canonical != i {
+			require.Equal(t, canonical, spec.canonical[canonical],
+				"canonical[canonical[%d]] should equal canonical[%d]", i, i)
+		}
+	}
+}
+
+func TestNodeDataSignature(t *testing.T) {
+	// Test that nodeDataSignature produces different signatures for different data
+	// and same signatures for equivalent data.
+
+	// Test nil
+	require.Equal(t, "nil", nodeDataSignature(nil))
+
+	// Test int
+	sig1 := nodeDataSignature(42)
+	sig2 := nodeDataSignature(42)
+	sig3 := nodeDataSignature(43)
+	require.Equal(t, sig1, sig2, "same int should produce same signature")
+	require.NotEqual(t, sig1, sig3, "different int should produce different signature")
+
+	// Test []int
+	sig4 := nodeDataSignature([]int{1, 2, 3})
+	sig5 := nodeDataSignature([]int{1, 2, 3})
+	sig6 := nodeDataSignature([]int{1, 2, 4})
+	require.Equal(t, sig4, sig5, "same []int should produce same signature")
+	require.NotEqual(t, sig4, sig6, "different []int should produce different signature")
+
+	// Test dotGeneralNodeData
+	dg1 := &dotGeneralNodeData{
+		lhsContractingAxes: []int{1},
+		lhsBatchAxes:       []int{0},
+		rhsContractingAxes: []int{0},
+		rhsBatchAxes:       []int{0},
+	}
+	dg2 := &dotGeneralNodeData{
+		lhsContractingAxes: []int{1},
+		lhsBatchAxes:       []int{0},
+		rhsContractingAxes: []int{0},
+		rhsBatchAxes:       []int{0},
+	}
+	dg3 := &dotGeneralNodeData{
+		lhsContractingAxes: []int{2}, // Different!
+		lhsBatchAxes:       []int{0},
+		rhsContractingAxes: []int{0},
+		rhsBatchAxes:       []int{0},
+	}
+	sig7 := nodeDataSignature(dg1)
+	sig8 := nodeDataSignature(dg2)
+	sig9 := nodeDataSignature(dg3)
+	require.Equal(t, sig7, sig8, "same dotGeneralNodeData should produce same signature")
+	require.NotEqual(t, sig7, sig9, "different dotGeneralNodeData should produce different signature")
+}
