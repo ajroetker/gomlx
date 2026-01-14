@@ -7,6 +7,7 @@ import (
 	"sync/atomic"
 
 	"github.com/gomlx/gomlx/backends"
+	"github.com/gomlx/gomlx/pkg/core/shapes"
 	"github.com/pkg/errors"
 )
 
@@ -69,7 +70,7 @@ func newFunctionExecutable(f *Function) (*FunctionExecutable, error) {
 
 	// Initialize execution buffers pool
 	fe.executionBuffersPool = sync.Pool{
-		New: func() interface{} {
+		New: func() any {
 			return &funcExecBuffers{
 				results:       make([]*Buffer, numNodesToProcess),
 				numUsed:       make([]atomic.Int32, numNodesToProcess),
@@ -113,6 +114,11 @@ type funcExecBuffers struct {
 	// opsExecutionType can be sequential or parallel.
 	opsExecutionType opsExecutionType
 
+	// nodeShapes holds resolved shapes for each node when using dynamic shape specialization.
+	// If nil, use node.shape directly. Set from ShapeSpecialization when executing
+	// graphs with dynamic axes.
+	nodeShapes []shapes.Shape
+
 	// Sequential execution-only: reused for each op.
 	opInputBuffers []*Buffer
 	opInputsOwned  []bool
@@ -123,7 +129,8 @@ type funcExecBuffers struct {
 
 // Execute runs the compiled function with the given inputs.
 // The inputs must match the function's parameters in count and shape.
-func (fe *FunctionExecutable) Execute(backend *Backend, inputs []*Buffer, donate []bool) ([]*Buffer, error) {
+// If spec is non-nil, it provides resolved shapes for dynamic axis execution.
+func (fe *FunctionExecutable) Execute(backend *Backend, inputs []*Buffer, donate []bool, spec *ShapeSpecialization) ([]*Buffer, error) {
 	// Use function's parameters (not builder.inputs) for proper closure support
 	funcParams := fe.function.parameters
 	if len(inputs) != len(funcParams) {
@@ -143,6 +150,13 @@ func (fe *FunctionExecutable) Execute(backend *Backend, inputs []*Buffer, donate
 		execBuf.owned[i] = false
 		execBuf.results[i] = nil
 		execBuf.remainingDeps[i] = 0
+	}
+
+	// Set resolved shapes from specialization if available
+	if spec != nil {
+		execBuf.nodeShapes = spec.nodeShapes
+	} else {
+		execBuf.nodeShapes = nil
 	}
 
 	// Set up parameters from inputs using builderIdx directly
@@ -263,7 +277,6 @@ func (fe *FunctionExecutable) executeParallel(backend *Backend, execBuf *funcExe
 	}
 
 	for nodeIdx := range readyToExecute {
-		nodeIdx := nodeIdx // Capture loop variable
 		nodeExecFn := func() {
 			node := fe.function.builder.nodes[nodeIdx]
 
@@ -371,16 +384,27 @@ func (fe *FunctionExecutable) executeNode(backend *Backend, node *Node, execBuf 
 			fe.numUses[inputIdx]-int(execBuf.numUsed[inputIdx].Load()) == 1
 	}
 
+	// Get the effective node for execution, using resolved shape if available.
+	// When executing with dynamic shape specialization, we need to use the
+	// concrete resolved shape instead of the symbolic shape with DimDynamic.
+	execNode := node
+	if execBuf.nodeShapes != nil {
+		// Create a shallow copy with the resolved shape
+		nodeCopy := *node
+		nodeCopy.shape = execBuf.nodeShapes[nodeIdx]
+		execNode = &nodeCopy
+	}
+
 	// Execute the node
-	if node.IsMultiOutputs() {
-		multiExecutor := multiOutputsNodeExecutors[node.opType]
+	if execNode.IsMultiOutputs() {
+		multiExecutor := multiOutputsNodeExecutors[execNode.opType]
 		if multiExecutor == nil {
-			return errors.Errorf("no multi-output executor for op %s", node.opType)
+			return errors.Errorf("no multi-output executor for op %s", execNode.opType)
 		}
 
-		outputBuffers, err := multiExecutor(backend, node, inputBuffers, inputsOwned)
+		outputBuffers, err := multiExecutor(backend, execNode, inputBuffers, inputsOwned)
 		if err != nil {
-			return errors.WithMessagef(err, "executing multi-output %s", node.opType)
+			return errors.WithMessagef(err, "executing multi-output %s", execNode.opType)
 		}
 
 		for outputIdx, outputBuf := range outputBuffers {
@@ -394,14 +418,14 @@ func (fe *FunctionExecutable) executeNode(backend *Backend, node *Node, execBuf 
 			execBuf.owned[outputNodeIdx] = true
 		}
 	} else {
-		executor := nodeExecutors[node.opType]
+		executor := nodeExecutors[execNode.opType]
 		if executor == nil {
-			return errors.Errorf("no executor for op %s", node.opType)
+			return errors.Errorf("no executor for op %s", execNode.opType)
 		}
 
-		result, err := executor(backend, node, inputBuffers, inputsOwned)
+		result, err := executor(backend, execNode, inputBuffers, inputsOwned)
 		if err != nil {
-			return errors.WithMessagef(err, "executing %s", node.opType)
+			return errors.WithMessagef(err, "executing %s", execNode.opType)
 		}
 		execBuf.results[nodeIdx] = result
 		execBuf.owned[nodeIdx] = true

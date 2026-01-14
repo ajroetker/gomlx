@@ -33,7 +33,7 @@ func execIf(backend *Backend, node *Node, inputs []*Buffer, inputsOwned []bool) 
 	}
 
 	// Execute the branch (no inputs since branches have no parameters)
-	outputs, err := branchFn.compiled.Execute(backend, nil, nil)
+	outputs, err := branchFn.compiled.Execute(backend, nil, nil, nil)
 	if err != nil {
 		return nil, errors.WithMessagef(err, "If: executing branch")
 	}
@@ -62,7 +62,7 @@ func execWhile(backend *Backend, node *Node, inputs []*Buffer, inputsOwned []boo
 	const maxIterations = 1_000_000 // Safety limit
 	for iter := range maxIterations {
 		// Evaluate condition
-		condOutputs, err := condFn.Execute(backend, state, nil)
+		condOutputs, err := condFn.Execute(backend, state, nil, nil)
 		if err != nil {
 			for _, buf := range state {
 				backend.putBuffer(buf)
@@ -80,7 +80,7 @@ func execWhile(backend *Backend, node *Node, inputs []*Buffer, inputsOwned []boo
 		}
 
 		// Execute body to get new state
-		newState, err := bodyFn.Execute(backend, state, nil)
+		newState, err := bodyFn.Execute(backend, state, nil, nil)
 		if err != nil {
 			for _, buf := range state {
 				backend.putBuffer(buf)
@@ -195,7 +195,7 @@ func execSort(backend *Backend, node *Node, inputs []*Buffer, inputsOwned []bool
 				}
 
 				// Execute comparator
-				compOutputs, err := compFn.Execute(backend, compInputs, nil)
+				compOutputs, err := compFn.Execute(backend, compInputs, nil, nil)
 				if err != nil {
 					sortErr = err
 					return false

@@ -431,7 +431,7 @@ func TestCompiledClosureExecute(t *testing.T) {
 
 	// Execute the closure
 	b := backend.(*Backend)
-	outputs, err := cc.Execute(b, []*Buffer{xBuf, yBuf}, nil)
+	outputs, err := cc.Execute(b, []*Buffer{xBuf, yBuf}, nil, nil)
 	require.NoError(t, err)
 	require.Len(t, outputs, 1, "Should have one output")
 
@@ -487,7 +487,7 @@ func TestCompiledClosureMultipleExecutions(t *testing.T) {
 			valid: true,
 		}
 
-		outputs, err := cc.Execute(b, []*Buffer{inputBuf}, nil)
+		outputs, err := cc.Execute(b, []*Buffer{inputBuf}, nil, nil)
 		require.NoError(t, err, "Execution %d failed", i)
 		require.Len(t, outputs, 1)
 
@@ -522,7 +522,7 @@ func TestCompiledClosureWithConstants(t *testing.T) {
 
 	// Execute with no inputs
 	simpleGoBackend := backend.(*Backend)
-	outputs, err := cc.Execute(simpleGoBackend, []*Buffer{}, nil)
+	outputs, err := cc.Execute(simpleGoBackend, []*Buffer{}, nil, nil)
 	require.NoError(t, err)
 	require.Len(t, outputs, 1)
 
@@ -567,7 +567,7 @@ func TestCompiledClosureMultipleOutputs(t *testing.T) {
 	}
 
 	b := backend.(*Backend)
-	outputs, err := cc.Execute(b, []*Buffer{inputBuf}, nil)
+	outputs, err := cc.Execute(b, []*Buffer{inputBuf}, nil, nil)
 	require.NoError(t, err)
 	require.Len(t, outputs, 2)
 
@@ -627,7 +627,7 @@ func TestCompiledClosureChainedOperations(t *testing.T) {
 	}
 
 	simpleGoBackend := backend.(*Backend)
-	outputs, err := cc.Execute(simpleGoBackend, []*Buffer{inputBuf}, nil)
+	outputs, err := cc.Execute(simpleGoBackend, []*Buffer{inputBuf}, nil, nil)
 	require.NoError(t, err)
 	require.Len(t, outputs, 1)
 
@@ -669,12 +669,12 @@ func TestCompiledClosureInputValidation(t *testing.T) {
 	simpleGoBackend := backend.(*Backend)
 
 	// Too few inputs
-	_, err = cc.Execute(simpleGoBackend, []*Buffer{xBuf}, nil)
+	_, err = cc.Execute(simpleGoBackend, []*Buffer{xBuf}, nil, nil)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "expects 2 inputs, got 1")
 
 	// Too many inputs
-	_, err = cc.Execute(simpleGoBackend, []*Buffer{xBuf, xBuf, xBuf}, nil)
+	_, err = cc.Execute(simpleGoBackend, []*Buffer{xBuf, xBuf, xBuf}, nil, nil)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "expects 2 inputs, got 3")
 }

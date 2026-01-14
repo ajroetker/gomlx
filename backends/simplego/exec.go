@@ -250,10 +250,9 @@ func (e *Executable) Execute(inputs []backends.Buffer, donate []bool, _ backends
 	if e.hasDynamicAxes {
 		spec = e.getOrCreateSpecialization(bindings)
 	}
-	_ = spec // TODO: use specialization in execution
 
-	// Delegate to FunctionExecutable
-	outputs, err := e.mainFn.Execute(e.backend, bufInputs, donate)
+	// Delegate to FunctionExecutable with specialization
+	outputs, err := e.mainFn.Execute(e.backend, bufInputs, donate, spec)
 	if err != nil {
 		return nil, err
 	}
