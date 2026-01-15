@@ -334,6 +334,9 @@ func itoa(i int) string {
 
 // BuildGraph builds the GLiNER forward pass graph.
 //
+// The input sequence format is: [CLS] <<ENT>> type1 <<ENT>> type2 ... <<SEP>> text [SEP]
+// Entity type representations are extracted from positions of <<ENT>> tokens (128002).
+//
 // Parameters:
 //   - ctx: context with loaded weights
 //   - inputIDs: token IDs, shape [batch, seq_len]
@@ -342,32 +345,81 @@ func itoa(i int) string {
 //   - entityTypeMask: entity type attention mask, shape [batch, num_types, type_seq_len]
 //
 // Returns:
-//   - spanScores: shape [batch, seq_len, seq_len, num_types] - scores for each span and entity type
+//   - spanScores: shape [batch, seq_len, max_width, num_types] - scores for each span and entity type
 func (m *Model) BuildGraph(ctx *context.Context, inputIDs, attentionMask, entityTypeIDs, entityTypeMask *Node) *Node {
 	ctx = ctx.In("gliner").Checked(false)
 	g := inputIDs.Graph()
 
 	// 1. Token representation (DeBERTa encoder + projection).
+	// This processes the entire sequence including entity type markers.
 	tokenRep := m.buildTokenRepresentation(ctx.In("token_rep"), inputIDs, attentionMask)
 	// tokenRep shape: [batch, seq_len, projection_dim]
 
-	// 2. BiLSTM.
+	// 2. Extract entity type embeddings from <<ENT>> token positions in the encoder output.
+	numTypes := entityTypeIDs.Shape().Dimensions[1]
+	batchSize := inputIDs.Shape().Dimensions[0]
+	entityRep := m.extractEntityTypeEmbeddings(tokenRep, inputIDs, numTypes)
+	// entityRep shape: [batch, num_types, projection_dim]
+
+	// 3. Apply prompt representation MLP to entity type embeddings.
+	// Flatten to 2D for MLP: [batch * num_types, projection_dim]
+	projDim := entityRep.Shape().Dimensions[2]
+	entityRep = Reshape(entityRep, batchSize*numTypes, projDim)
+	entityRep = applyMLP(ctx.In("prompt_rep"), entityRep, g)
+	// Reshape back to 3D: [batch, num_types, projection_dim]
+	entityRep = Reshape(entityRep, batchSize, numTypes, projDim)
+
+	// 4. BiLSTM on token representations.
 	tokenRep = m.buildBiLSTM(ctx.In("rnn"), tokenRep)
 	// tokenRep shape: [batch, seq_len, projection_dim]
 
-	// 3. Entity type representation.
-	entityRep := m.buildEntityTypeRepresentation(ctx, entityTypeIDs, entityTypeMask)
-	// entityRep shape: [batch, num_types, projection_dim]
-
-	// 4. Span representation.
+	// 5. Span representation.
 	spanRep := m.buildSpanRepresentation(ctx.In("span_rep"), tokenRep)
 	// spanRep shape: [batch, seq_len, max_width, projection_dim]
 
-	// 5. Score spans against entity types.
+	// 6. Score spans against entity types.
 	scores := m.buildSpanScoring(g, spanRep, entityRep)
 	// scores shape: [batch, seq_len, max_width, num_types]
 
 	return scores
+}
+
+// extractEntityTypeEmbeddings extracts embeddings at positions of <<ENT>> tokens.
+// The <<ENT>> token (128002) marks entity type positions in the input sequence.
+func (m *Model) extractEntityTypeEmbeddings(tokenRep, inputIDs *Node, numTypes int) *Node {
+	// In GLiNER, entity types are marked with <<ENT>> tokens.
+	// Input format: [CLS] <<ENT>> type1 <<ENT>> type2 ... <<SEP>> text
+	// With single-token type names, <<ENT>> tokens are at positions 1, 3, 5, ...
+	// We extract embeddings at these positions.
+
+	batchSize := tokenRep.Shape().Dimensions[0]
+	projDim := tokenRep.Shape().Dimensions[2]
+
+	entityEmbeddings := make([]*Node, numTypes)
+	for i := 0; i < numTypes; i++ {
+		// Position of i-th entity type token (after <<ENT>>)
+		// Format: [CLS]=0, [<<ENT>>=1, type1=2], [<<ENT>>=3, type2=4], ...
+		// We use the entity type token (not <<ENT>>) for differentiated embeddings.
+		pos := 2 + i*2
+
+		// Extract embedding at this position: Slice gives [batch, 1, projDim]
+		emb := Slice(tokenRep, AxisRange(), AxisRange(pos, pos+1), AxisRange())
+		// Reshape to remove the size-1 dimension: [batch, projDim]
+		emb = Reshape(emb, batchSize, projDim)
+		entityEmbeddings[i] = emb
+	}
+
+	// Stack along new dimension: [batch, num_types, projDim]
+	// First insert dimension for each: [batch, 1, projDim]
+	for i := range entityEmbeddings {
+		entityEmbeddings[i] = InsertAxes(entityEmbeddings[i], 1)
+	}
+
+	// Concatenate along type dimension: [batch, num_types, projDim]
+	if len(entityEmbeddings) == 1 {
+		return entityEmbeddings[0]
+	}
+	return Concatenate(entityEmbeddings, 1)
 }
 
 // buildTokenRepresentation builds the token representation from input IDs.
@@ -546,34 +598,44 @@ func lstmForward(ctx *context.Context, x *Node, g *Graph) *Node {
 }
 
 // buildEntityTypeRepresentation builds representations for entity types.
+// Uses a simpler path than the full encoder: embeddings → mean pooling → prompt_rep MLP.
 func (m *Model) buildEntityTypeRepresentation(ctx *context.Context, entityTypeIDs, entityTypeMask *Node) *Node {
 	g := entityTypeIDs.Graph()
 
-	// Entity types are processed through the same encoder.
-	// Shape: [batch, num_types, type_seq_len] -> [batch * num_types, type_seq_len]
+	// Shape: [batch, num_types, type_seq_len]
 	batchSize := entityTypeIDs.Shape().Dimensions[0]
 	numTypes := entityTypeIDs.Shape().Dimensions[1]
 	typeSeqLen := entityTypeIDs.Shape().Dimensions[2]
 
-	// Flatten batch and num_types.
+	// Flatten batch and num_types for embedding lookup.
 	flatIDs := Reshape(entityTypeIDs, batchSize*numTypes, typeSeqLen)
 	flatMask := Reshape(entityTypeMask, batchSize*numTypes, typeSeqLen)
 
-	// Run through token representation.
-	typeRep := m.buildTokenRepresentation(ctx.In("token_rep"), flatIDs, flatMask)
-	// typeRep shape: [batch*num_types, type_seq_len, projection_dim]
+	// Get embeddings directly (same embedding table as main encoder).
+	embCtx := ctx.In("token_rep").In("embeddings")
+	embeddings := layers.Embedding(embCtx, flatIDs, dtypes.Float32, m.Config.VocabSize, m.Config.HiddenSize)
+	// embeddings shape: [batch*num_types, type_seq_len, hidden_size]
+
+	// Ensure 3D output (handle seq_len=1 case).
+	if embeddings.Shape().Rank() == 2 {
+		embeddings = InsertAxes(embeddings, 1)
+	}
+
+	// Project embeddings from hidden_size (768) to projection_dim (512).
+	projected := applyDenseWithBias(ctx.In("token_rep").In("projection"), embeddings, g)
+	// projected shape: [batch*num_types, type_seq_len, projection_dim]
 
 	// Mean pooling over sequence (using mask).
 	maskExpanded := InsertAxes(flatMask, -1)
-	maskExpanded = ConvertDType(maskExpanded, typeRep.DType())
-	typeRep = Mul(typeRep, maskExpanded)
-	typeRep = ReduceSum(typeRep, 1)
+	maskExpanded = ConvertDType(maskExpanded, projected.DType())
+	maskedProj := Mul(projected, maskExpanded)
+	pooled := ReduceSum(maskedProj, 1)
 	maskSum := ReduceSum(maskExpanded, 1)
-	typeRep = Div(typeRep, Add(maskSum, ConstAs(maskSum, 1e-9)))
-	// typeRep shape: [batch*num_types, projection_dim]
+	pooled = Div(pooled, Add(maskSum, ConstAs(maskSum, 1e-9)))
+	// pooled shape: [batch*num_types, projection_dim]
 
 	// Apply prompt representation MLP.
-	typeRep = applyMLP(ctx.In("prompt_rep"), typeRep, g)
+	typeRep := applyMLP(ctx.In("prompt_rep"), pooled, g)
 	// typeRep shape: [batch*num_types, projection_dim]
 
 	// Reshape back to [batch, num_types, projection_dim].
@@ -634,6 +696,9 @@ func (m *Model) buildSpanScoring(g *Graph, spanRep, entityRep *Node) *Node {
 	// Dot product between span representations and entity representations.
 	// scores[b, i, w, t] = spanRep[b, i, w, :] . entityRep[b, t, :]
 	scores := Einsum("biwd,btd->biwt", spanRep, entityRep)
+
+	// Apply sigmoid to convert logits to probabilities.
+	scores = Sigmoid(scores)
 
 	return scores
 }
