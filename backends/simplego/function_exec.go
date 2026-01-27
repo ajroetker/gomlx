@@ -34,6 +34,13 @@ type FunctionExecutable struct {
 
 	// executionBuffersPool allows reuse of execution buffers.
 	executionBuffersPool sync.Pool
+
+	// seqInputBuffersPool pools input buffer slices for sequential execution only.
+	// Parallel execution must allocate per-node to avoid races.
+	seqInputBuffersPool sync.Pool
+
+	// seqInputOwnedPool pools input ownership slices for sequential execution only.
+	seqInputOwnedPool sync.Pool
 }
 
 // newFunctionExecutable creates a FunctionExecutable for the given function.
@@ -76,7 +83,9 @@ func newFunctionExecutable(f *Function) (*FunctionExecutable, error) {
 		fe.countNodeUsesAndDependents(output)
 	}
 
-	// Initialize execution buffers pool
+	// Initialize execution buffers pool with pre-allocated slices to avoid per-execution allocations.
+	numOutputs := len(f.outputs)
+	maxInputs := fe.maxInputs
 	fe.executionBuffersPool = sync.Pool{
 		New: func() interface{} {
 			return &funcExecBuffers{
@@ -84,7 +93,21 @@ func newFunctionExecutable(f *Function) (*FunctionExecutable, error) {
 				numUsed:       make([]atomic.Int32, numNodesToProcess),
 				owned:         make([]bool, numNodesToProcess),
 				remainingDeps: make([]int, numNodesToProcess),
+				outputs:       make([]*Buffer, numOutputs),
 			}
+		},
+	}
+
+	// Initialize pools for sequential execution input slices.
+	// These are separate because parallel execution must allocate per-node to avoid races.
+	fe.seqInputBuffersPool = sync.Pool{
+		New: func() interface{} {
+			return make([]*Buffer, maxInputs)
+		},
+	}
+	fe.seqInputOwnedPool = sync.Pool{
+		New: func() interface{} {
+			return make([]bool, maxInputs)
 		},
 	}
 
@@ -129,10 +152,13 @@ type funcExecBuffers struct {
 	// remainingDeps is the number of remaining dependencies for each node.
 	remainingDeps []int
 
+	// outputs is pre-allocated to hold output buffers, avoiding allocation per execution.
+	outputs []*Buffer
+
 	// opsExecutionType can be sequential or parallel.
 	opsExecutionType opsExecutionType
 
-	// Sequential execution-only: reused for each op.
+	// Sequential execution-only: reused for each op, pre-allocated to maxInputs size.
 	opInputBuffers []*Buffer
 	opInputsOwned  []bool
 
@@ -159,15 +185,8 @@ func (fe *FunctionExecutable) Execute(backend *Backend, inputs []*Buffer, donate
 			len(fe.function.capturedLocalNodes), len(capturedInputs))
 	}
 
-	// donate defaults to false
-	if len(donate) == 0 {
-		donate = make([]bool, len(inputs))
-	}
-
-	// donateCaptures defaults to false (no donation)
-	if len(donateCaptures) == 0 {
-		donateCaptures = make([]bool, len(capturedInputs))
-	}
+	// donate and donateCaptures default to nil (treated as all-false).
+	// We avoid allocating slices here by checking for nil in the loop below.
 
 	// Get execution buffers from pool and reset
 	execBuf := fe.executionBuffersPool.Get().(*funcExecBuffers)
@@ -178,19 +197,21 @@ func (fe *FunctionExecutable) Execute(backend *Backend, inputs []*Buffer, donate
 		execBuf.remainingDeps[i] = 0
 	}
 
-	// Set up parameters from inputs using idx directly
+	// Set up parameters from inputs using idx directly.
+	// donate may be nil (meaning all false), so we check before indexing.
 	for i, inputNode := range funcParams {
 		inputIdx := inputNode.idx
 		execBuf.results[inputIdx] = inputs[i]
-		execBuf.owned[inputIdx] = donate[i]
+		execBuf.owned[inputIdx] = donate != nil && donate[i]
 	}
 
 	// Set up captured values from parent scope.
 	// If donateCaptures[i] is true, the closure takes ownership of the buffer.
+	// donateCaptures may be nil (meaning all false), so we check before indexing.
 	for i, captureNode := range fe.function.capturedLocalNodes {
 		captureIdx := captureNode.idx
 		execBuf.results[captureIdx] = capturedInputs[i]
-		execBuf.owned[captureIdx] = donateCaptures[i]
+		execBuf.owned[captureIdx] = donateCaptures != nil && donateCaptures[i]
 	}
 
 	// Decide execution mode
@@ -216,8 +237,8 @@ func (fe *FunctionExecutable) Execute(backend *Backend, inputs []*Buffer, donate
 		return nil, err
 	}
 
-	// Collect outputs
-	outputs := make([]*Buffer, len(fe.outputNodes))
+	// Collect outputs using pre-allocated slice from pool.
+	outputs := execBuf.outputs
 	for i, outNode := range fe.outputNodes {
 		outIdx := outNode.idx
 		outputs[i] = execBuf.results[outIdx]
@@ -232,6 +253,11 @@ func (fe *FunctionExecutable) Execute(backend *Backend, inputs []*Buffer, donate
 		execBuf.results[outIdx] = nil // Prevent double-free
 	}
 
+	// Create a new slice to return (we can't return the pooled one directly).
+	// This single allocation replaces the previous per-execution allocation.
+	result := make([]*Buffer, len(outputs))
+	copy(result, outputs)
+
 	// Free any remaining owned buffers that weren't outputs
 	for idx, buf := range execBuf.results {
 		if buf != nil && execBuf.owned[idx] {
@@ -240,15 +266,19 @@ func (fe *FunctionExecutable) Execute(backend *Backend, inputs []*Buffer, donate
 	}
 
 	fe.executionBuffersPool.Put(execBuf)
-	return outputs, nil
+	return result, nil
 }
 
 // executeSequentially executes nodes one after another in topological order.
 func (fe *FunctionExecutable) executeSequentially(backend *Backend, execBuf *funcExecBuffers) error {
-	// Pre-allocate input buffers for reuse
-	execBuf.opInputBuffers = make([]*Buffer, fe.maxInputs)
-	execBuf.opInputsOwned = make([]bool, fe.maxInputs)
+	// Get input slices from pool for reuse during sequential execution.
+	execBuf.opInputBuffers = fe.seqInputBuffersPool.Get().([]*Buffer)
+	execBuf.opInputsOwned = fe.seqInputOwnedPool.Get().([]bool)
+	clear(execBuf.opInputBuffers)
+	clear(execBuf.opInputsOwned)
 	defer func() {
+		fe.seqInputBuffersPool.Put(execBuf.opInputBuffers)
+		fe.seqInputOwnedPool.Put(execBuf.opInputsOwned)
 		execBuf.opInputBuffers = nil
 		execBuf.opInputsOwned = nil
 	}()
@@ -428,17 +458,31 @@ func (fe *FunctionExecutable) executeNode(backend *Backend, node *Node, execBuf 
 	// Closure executors receive captured inputs separately with explicit ownership tracking.
 	closureExecutor := nodeClosureExecutors[node.opType]
 	if closureExecutor != nil {
-		// Build []ClosureInputs from node.capturedInputs (already grouped per closure).
-		closureInputs := make([]ClosureInputs, len(node.capturedInputs))
+		// Build capture counts for workspace allocation.
+		// Use stack-allocated array for common cases (If/While have 2 closures, Sort has 1).
+		numClosures := len(node.capturedInputs)
+		var captureCountsBuf [4]int
+		var captureCounts []int
+		if numClosures <= len(captureCountsBuf) {
+			captureCounts = captureCountsBuf[:numClosures]
+		} else {
+			captureCounts = make([]int, numClosures)
+		}
 		for closureIdx, closureCaptures := range node.capturedInputs {
-			closureInputs[closureIdx] = ClosureInputs{
-				Buffers: make([]*Buffer, len(closureCaptures)),
-				Owned:   make([]bool, len(closureCaptures)),
-			}
+			captureCounts[closureIdx] = len(closureCaptures)
+		}
+
+		// Get pooled workspace for ClosureInputs
+		ciWorkspace := getClosureInputsWorkspace(captureCounts)
+		closureInputs := ciWorkspace.closureInputs
+
+		// Fill in the buffer pointers and ownership flags
+		for closureIdx, closureCaptures := range node.capturedInputs {
 			for i, capturedNode := range closureCaptures {
 				capturedIdx := capturedNode.idx
 				closureInputs[closureIdx].Buffers[i] = execBuf.results[capturedIdx]
 				if closureInputs[closureIdx].Buffers[i] == nil {
+					putClosureInputsWorkspace(ciWorkspace)
 					return errors.Errorf("captured input %d for closure %d of node %s not computed yet", i, closureIdx, node.opType)
 				}
 				// Only "own" the captured input if this is the last use of it.
@@ -449,6 +493,7 @@ func (fe *FunctionExecutable) executeNode(backend *Backend, node *Node, execBuf 
 
 		outputBuffers, err := closureExecutor(backend, node, inputBuffers, inputsOwned, closureInputs)
 		if err != nil {
+			putClosureInputsWorkspace(ciWorkspace)
 			return errors.WithMessagef(err, "executing closure op %s", node.opType)
 		}
 
@@ -461,6 +506,9 @@ func (fe *FunctionExecutable) executeNode(backend *Backend, node *Node, execBuf 
 				}
 			}
 		}
+
+		// Return workspace to pool
+		putClosureInputsWorkspace(ciWorkspace)
 
 		// Handle outputs (closure ops are always multi-output style)
 		for outputIdx, outputBuf := range outputBuffers {
