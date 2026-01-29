@@ -127,6 +127,13 @@ var Capabilities = backends.Capabilities{
 		backends.OpTypeWhile: true,
 		backends.OpTypeSort:  true,
 
+		// Fused operations:
+		backends.OpTypeSoftmax:          true,
+		backends.OpTypeLayerNorm:        true,
+		backends.OpTypeGelu:             true,
+		backends.OpTypeLinear:           true,
+		backends.OpTypeLinearActivation: true,
+
 		// TODO: not implemented yet:
 		// backends.OpTypePad: true,
 		// backends.OpTypeReverse: true,
