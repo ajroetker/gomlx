@@ -60,6 +60,8 @@ var (
 		"FusedLayerNorm.gamma", "FusedLayerNorm.beta",
 		"FusedDense.bias",
 		"FusedDenseActivation.bias",
+		"FusedMultiHeadSDPA.mask",
+		"FusedQKVDense.biasQ", "FusedQKVDense.biasK", "FusedQKVDense.biasV",
 	)
 
 	// methodsExcluded from generating and even from having a NodeType.

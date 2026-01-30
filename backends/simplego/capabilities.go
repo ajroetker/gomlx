@@ -133,6 +133,8 @@ var Capabilities = backends.Capabilities{
 		backends.OpTypeFusedGelu:             true,
 		backends.OpTypeFusedDense:            true,
 		backends.OpTypeFusedDenseActivation:  true,
+		backends.OpTypeFusedMultiHeadSDPA:    true,
+		backends.OpTypeFusedQKVDense:         true,
 
 		// TODO: not implemented yet:
 		// backends.OpTypePad: true,

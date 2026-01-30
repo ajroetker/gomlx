@@ -17,6 +17,8 @@ func init() {
 	setNodeExecutor(backends.OpTypeFusedLayerNorm, priorityTyped, execFusedLayerNorm)
 	setNodeExecutor(backends.OpTypeFusedDense, priorityTyped, execFusedDense)
 	setNodeExecutor(backends.OpTypeFusedDenseActivation, priorityTyped, execFusedDenseActivation)
+	setNodeExecutor(backends.OpTypeFusedMultiHeadSDPA, priorityTyped, execFusedMultiHeadSDPA)
+	multiOutputsNodeExecutors[backends.OpTypeFusedQKVDense] = execFusedQKVDense
 }
 
 // computeAxisStrides returns the outer size, axis size, and inner size for iterating
@@ -719,6 +721,362 @@ func applyActivationFloat32(data []float32, activation backends.ActivationType) 
 		for i, x := range data {
 			data[i] = float32(math.Tanh(float64(x)))
 		}
+	}
+}
+
+// execFusedMultiHeadSDPA implements multi-head scaled dot-product attention.
+// q: [batch, numHeads, seqLen, headDim], k/v: [batch, numKVHeads, kvLen, headDim]
+// mask: [seqLen, kvLen] (optional, additive)
+// output: [batch, numHeads, seqLen, headDim]
+func execFusedMultiHeadSDPA(backend *Backend, node *Node, inputs []*Buffer, inputsOwned []bool) (*Buffer, error) {
+	data := node.data.(*nodeFusedMultiHeadSDPA)
+	q := inputs[0]
+	k := inputs[1]
+	v := inputs[2]
+	var mask *Buffer
+	if len(inputs) > 3 {
+		mask = inputs[3]
+	}
+	output := backend.getBufferForShape(node.shape)
+
+	switch q.shape.DType {
+	case dtypes.Float32:
+		var maskData []float32
+		if mask != nil {
+			maskData = mask.flat.([]float32)
+		}
+		multiHeadSDPAFloat32(
+			q.flat.([]float32), k.flat.([]float32), v.flat.([]float32), maskData, output.flat.([]float32),
+			q.shape.Dimensions[0], data.numHeads, data.numKVHeads,
+			q.shape.Dimensions[2], k.shape.Dimensions[2], q.shape.Dimensions[3],
+			float32(data.scale), data.causal,
+		)
+	case dtypes.Float64:
+		var maskData []float64
+		if mask != nil {
+			maskData = mask.flat.([]float64)
+		}
+		multiHeadSDPAFloat64(
+			q.flat.([]float64), k.flat.([]float64), v.flat.([]float64), maskData, output.flat.([]float64),
+			q.shape.Dimensions[0], data.numHeads, data.numKVHeads,
+			q.shape.Dimensions[2], k.shape.Dimensions[2], q.shape.Dimensions[3],
+			data.scale, data.causal,
+		)
+	default:
+		return nil, errors.Errorf("FusedMultiHeadSDPA: unsupported dtype %s", q.shape.DType)
+	}
+	return output, nil
+}
+
+func sdpaFloat32(q, k, v, mask, scores, output []float32, seqLen, kvLen, headDim int, scale float32, causal bool) {
+	// Step 1: scores[i][j] = sum_d(q[i][d] * k[j][d]) * scale + mask[i][j]
+	for i := 0; i < seqLen; i++ {
+		// Compute row max for numerical stability.
+		rowMax := float32(math.Inf(-1))
+		for j := 0; j < kvLen; j++ {
+			if causal && j > i {
+				scores[i*kvLen+j] = float32(math.Inf(-1))
+				continue
+			}
+			var dot float32
+			for d := 0; d < headDim; d++ {
+				dot += q[i*headDim+d] * k[j*headDim+d]
+			}
+			s := dot * scale
+			if mask != nil {
+				s += mask[i*kvLen+j]
+			}
+			scores[i*kvLen+j] = s
+			if s > rowMax {
+				rowMax = s
+			}
+		}
+
+		// Softmax: exp(scores - max) and sum.
+		var sum float32
+		for j := 0; j < kvLen; j++ {
+			scores[i*kvLen+j] = float32(math.Exp(float64(scores[i*kvLen+j] - rowMax)))
+			sum += scores[i*kvLen+j]
+		}
+		invSum := float32(1.0) / sum
+		for j := 0; j < kvLen; j++ {
+			scores[i*kvLen+j] *= invSum
+		}
+
+		// Step 2: output[i][d] = sum_j(scores[i][j] * v[j][d])
+		for d := 0; d < headDim; d++ {
+			var acc float32
+			for j := 0; j < kvLen; j++ {
+				acc += scores[i*kvLen+j] * v[j*headDim+d]
+			}
+			output[i*headDim+d] = acc
+		}
+	}
+}
+
+func multiHeadSDPAFloat32(q, k, v, mask, output []float32,
+	batchSize, numHeads, numKVHeads, seqLen, kvLen, headDim int,
+	scale float32, causal bool,
+) {
+	headsPerKV := numHeads / numKVHeads
+	scores := make([]float32, seqLen*kvLen)
+	headSize := seqLen * headDim
+	kvHeadSize := kvLen * headDim
+	for b := 0; b < batchSize; b++ {
+		for h := 0; h < numHeads; h++ {
+			kvH := h / headsPerKV
+			qOff := (b*numHeads + h) * headSize
+			kOff := (b*numKVHeads + kvH) * kvHeadSize
+			vOff := kOff
+			oOff := qOff
+			sdpaFloat32(
+				q[qOff:qOff+headSize], k[kOff:kOff+kvHeadSize], v[vOff:vOff+kvHeadSize],
+				mask, scores, output[oOff:oOff+headSize],
+				seqLen, kvLen, headDim, scale, causal,
+			)
+		}
+	}
+}
+
+func sdpaFloat64(q, k, v, mask, scores, output []float64, seqLen, kvLen, headDim int, scale float64, causal bool) {
+	for i := 0; i < seqLen; i++ {
+		rowMax := math.Inf(-1)
+		for j := 0; j < kvLen; j++ {
+			if causal && j > i {
+				scores[i*kvLen+j] = math.Inf(-1)
+				continue
+			}
+			var dot float64
+			for d := 0; d < headDim; d++ {
+				dot += q[i*headDim+d] * k[j*headDim+d]
+			}
+			s := dot * scale
+			if mask != nil {
+				s += mask[i*kvLen+j]
+			}
+			scores[i*kvLen+j] = s
+			if s > rowMax {
+				rowMax = s
+			}
+		}
+
+		var sum float64
+		for j := 0; j < kvLen; j++ {
+			scores[i*kvLen+j] = math.Exp(scores[i*kvLen+j] - rowMax)
+			sum += scores[i*kvLen+j]
+		}
+		invSum := 1.0 / sum
+		for j := 0; j < kvLen; j++ {
+			scores[i*kvLen+j] *= invSum
+		}
+
+		for d := 0; d < headDim; d++ {
+			var acc float64
+			for j := 0; j < kvLen; j++ {
+				acc += scores[i*kvLen+j] * v[j*headDim+d]
+			}
+			output[i*headDim+d] = acc
+		}
+	}
+}
+
+func multiHeadSDPAFloat64(q, k, v, mask, output []float64,
+	batchSize, numHeads, numKVHeads, seqLen, kvLen, headDim int,
+	scale float64, causal bool,
+) {
+	headsPerKV := numHeads / numKVHeads
+	scores := make([]float64, seqLen*kvLen)
+	headSize := seqLen * headDim
+	kvHeadSize := kvLen * headDim
+	for b := 0; b < batchSize; b++ {
+		for h := 0; h < numHeads; h++ {
+			kvH := h / headsPerKV
+			qOff := (b*numHeads + h) * headSize
+			kOff := (b*numKVHeads + kvH) * kvHeadSize
+			vOff := kOff
+			oOff := qOff
+			sdpaFloat64(
+				q[qOff:qOff+headSize], k[kOff:kOff+kvHeadSize], v[vOff:vOff+kvHeadSize],
+				mask, scores, output[oOff:oOff+headSize],
+				seqLen, kvLen, headDim, scale, causal,
+			)
+		}
+	}
+}
+
+// execFusedQKVDense implements fused QKV projection.
+// x: [batch, inFeatures], wQKV: [qDim+2*kvDim, inFeatures] (row-major, Q/K/V stacked)
+// biasQ: [qDim] (opt), biasK: [kvDim] (opt), biasV: [kvDim] (opt)
+// outputs: q [batch, qDim], k [batch, kvDim], v [batch, kvDim]
+func execFusedQKVDense(backend *Backend, node *Node, inputs []*Buffer, inputsOwned []bool) ([]*Buffer, error) {
+	data := node.data.(*nodeFusedQKVDense)
+	x := inputs[0]
+	wQKV := inputs[1]
+
+	// Determine bias buffers by position.
+	var biasQ, biasK, biasV *Buffer
+	biasIdx := 2
+	if biasIdx < len(inputs) {
+		biasQ = inputs[biasIdx]
+		biasIdx++
+	}
+	if biasIdx < len(inputs) {
+		biasK = inputs[biasIdx]
+		biasIdx++
+	}
+	if biasIdx < len(inputs) {
+		biasV = inputs[biasIdx]
+	}
+
+	qShape := node.multiOutputsShapes[0]
+	kShape := node.multiOutputsShapes[1]
+	vShape := node.multiOutputsShapes[2]
+	qBuf := backend.getBufferForShape(qShape)
+	kBuf := backend.getBufferForShape(kShape)
+	vBuf := backend.getBufferForShape(vShape)
+
+	inFeatures := x.shape.Dimensions[x.shape.Rank()-1]
+	batchSize := x.shape.Size() / inFeatures
+
+	switch x.shape.DType {
+	case dtypes.Float32:
+		var bqData, bkData, bvData []float32
+		if biasQ != nil {
+			bqData = biasQ.flat.([]float32)
+		}
+		if biasK != nil {
+			bkData = biasK.flat.([]float32)
+		}
+		if biasV != nil {
+			bvData = biasV.flat.([]float32)
+		}
+		qkvDenseFloat32(
+			x.flat.([]float32), wQKV.flat.([]float32),
+			bqData, bkData, bvData,
+			qBuf.flat.([]float32), kBuf.flat.([]float32), vBuf.flat.([]float32),
+			batchSize, inFeatures, data.qDim, data.kvDim,
+		)
+	case dtypes.Float64:
+		var bqData, bkData, bvData []float64
+		if biasQ != nil {
+			bqData = biasQ.flat.([]float64)
+		}
+		if biasK != nil {
+			bkData = biasK.flat.([]float64)
+		}
+		if biasV != nil {
+			bvData = biasV.flat.([]float64)
+		}
+		qkvDenseFloat64(
+			x.flat.([]float64), wQKV.flat.([]float64),
+			bqData, bkData, bvData,
+			qBuf.flat.([]float64), kBuf.flat.([]float64), vBuf.flat.([]float64),
+			batchSize, inFeatures, data.qDim, data.kvDim,
+		)
+	default:
+		return nil, errors.Errorf("FusedQKVDense: unsupported dtype %s", x.shape.DType)
+	}
+
+	return []*Buffer{qBuf, kBuf, vBuf}, nil
+}
+
+func qkvDenseFloat32(x, wQKV, biasQ, biasK, biasV, q, k, v []float32,
+	batchSize, inFeatures, qDim, kvDim int,
+) {
+	totalOut := qDim + 2*kvDim
+	// wQKV is [totalOut, inFeatures] row-major
+	for b := 0; b < batchSize; b++ {
+		xBase := b * inFeatures
+		qBase := b * qDim
+		kBase := b * kvDim
+		vBase := b * kvDim
+
+		// Q = x @ wQ^T + biasQ, where wQ = wQKV[0:qDim, :]
+		for o := 0; o < qDim; o++ {
+			var sum float32
+			wBase := o * inFeatures
+			for i := 0; i < inFeatures; i++ {
+				sum += x[xBase+i] * wQKV[wBase+i]
+			}
+			if biasQ != nil {
+				sum += biasQ[o]
+			}
+			q[qBase+o] = sum
+		}
+		// K = x @ wK^T + biasK, where wK = wQKV[qDim:qDim+kvDim, :]
+		for o := 0; o < kvDim; o++ {
+			var sum float32
+			wBase := (qDim + o) * inFeatures
+			for i := 0; i < inFeatures; i++ {
+				sum += x[xBase+i] * wQKV[wBase+i]
+			}
+			if biasK != nil {
+				sum += biasK[o]
+			}
+			k[kBase+o] = sum
+		}
+		// V = x @ wV^T + biasV, where wV = wQKV[qDim+kvDim:, :]
+		for o := 0; o < kvDim; o++ {
+			var sum float32
+			wBase := (qDim + kvDim + o) * inFeatures
+			for i := 0; i < inFeatures; i++ {
+				sum += x[xBase+i] * wQKV[wBase+i]
+			}
+			if biasV != nil {
+				sum += biasV[o]
+			}
+			v[vBase+o] = sum
+		}
+
+		_ = totalOut
+	}
+}
+
+func qkvDenseFloat64(x, wQKV, biasQ, biasK, biasV, q, k, v []float64,
+	batchSize, inFeatures, qDim, kvDim int,
+) {
+	totalOut := qDim + 2*kvDim
+	for b := 0; b < batchSize; b++ {
+		xBase := b * inFeatures
+		qBase := b * qDim
+		kBase := b * kvDim
+		vBase := b * kvDim
+
+		for o := 0; o < qDim; o++ {
+			var sum float64
+			wBase := o * inFeatures
+			for i := 0; i < inFeatures; i++ {
+				sum += x[xBase+i] * wQKV[wBase+i]
+			}
+			if biasQ != nil {
+				sum += biasQ[o]
+			}
+			q[qBase+o] = sum
+		}
+		for o := 0; o < kvDim; o++ {
+			var sum float64
+			wBase := (qDim + o) * inFeatures
+			for i := 0; i < inFeatures; i++ {
+				sum += x[xBase+i] * wQKV[wBase+i]
+			}
+			if biasK != nil {
+				sum += biasK[o]
+			}
+			k[kBase+o] = sum
+		}
+		for o := 0; o < kvDim; o++ {
+			var sum float64
+			wBase := (qDim + kvDim + o) * inFeatures
+			for i := 0; i < inFeatures; i++ {
+				sum += x[xBase+i] * wQKV[wBase+i]
+			}
+			if biasV != nil {
+				sum += biasV[o]
+			}
+			v[vBase+o] = sum
+		}
+
+		_ = totalOut
 	}
 }
 

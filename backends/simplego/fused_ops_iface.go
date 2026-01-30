@@ -16,9 +16,19 @@ func FusedOpOutput(backend *Backend, node *Node) *Buffer {
 	return backend.getBufferForShape(node.shape)
 }
 
+// FusedOpOutputForShape allocates an output buffer for a given shape.
+func FusedOpOutputForShape(backend *Backend, shape shapes.Shape) *Buffer {
+	return backend.getBufferForShape(shape)
+}
+
 // FusedOpOutputShape returns the output shape for a fused op node.
 func FusedOpOutputShape(node *Node) shapes.Shape {
 	return node.shape
+}
+
+// MultiOutputShapes returns the output shapes for a multi-output node.
+func MultiOutputShapes(node *Node) []shapes.Shape {
+	return node.multiOutputsShapes
 }
 
 // SoftmaxParams extracts the axis from a Softmax node.
@@ -35,6 +45,18 @@ func LayerNormParams(node *Node) (axes []int, epsilon float64) {
 // DenseActivationParams extracts the activation type from a DenseActivation node.
 func DenseActivationParams(node *Node) backends.ActivationType {
 	return node.data.(*nodeFusedDenseActivation).activation
+}
+
+// MultiHeadSDPAParams extracts the parameters from a MultiHeadSDPA node.
+func MultiHeadSDPAParams(node *Node) (numHeads, numKVHeads int, scale float64, causal bool) {
+	data := node.data.(*nodeFusedMultiHeadSDPA)
+	return data.numHeads, data.numKVHeads, data.scale, data.causal
+}
+
+// QKVDenseParams extracts the parameters from a QKVDense node.
+func QKVDenseParams(node *Node) (qDim, kvDim int) {
+	data := node.data.(*nodeFusedQKVDense)
+	return data.qDim, data.kvDim
 }
 
 // LayerNormFloat32Fallback is the scalar implementation of LayerNorm for float32.
