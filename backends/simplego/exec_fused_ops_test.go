@@ -538,3 +538,316 @@ func TestFusedSoftmax_3D(t *testing.T) {
 		assert.InDelta(t, want[i], got[i], fusedTestTol, "index %d", i)
 	}
 }
+
+// execFusedOpMultiOutput builds, compiles and executes a multi-output fused op graph.
+// buildFn receives the Function and the parameter Values, and returns 3 output Values.
+func execFusedOpMultiOutput3(t *testing.T, inputShapes []shapes.Shape, inputDatas []interface{},
+	buildFn func(f backends.Function, params []backends.Value) (backends.Value, backends.Value, backends.Value, error),
+) [3]*Buffer {
+	t.Helper()
+	builder := backend.Builder("fused_test_multiout")
+	mainFn := builder.Main()
+
+	params := make([]backends.Value, len(inputShapes))
+	for i, s := range inputShapes {
+		p, err := mainFn.Parameter("x"+string(rune('0'+i)), s, nil)
+		require.NoError(t, err)
+		params[i] = p
+	}
+
+	o0, o1, o2, err := buildFn(mainFn, params)
+	require.NoError(t, err)
+
+	err = mainFn.Return([]backends.Value{o0, o1, o2}, nil)
+	require.NoError(t, err)
+
+	exec, err := builder.Compile()
+	require.NoError(t, err)
+
+	inputBufs := make([]backends.Buffer, len(inputDatas))
+	for i, data := range inputDatas {
+		buf, err := backend.BufferFromFlatData(0, data, inputShapes[i])
+		require.NoError(t, err)
+		inputBufs[i] = buf
+	}
+
+	outputs, err := exec.Execute(inputBufs, nil, 0)
+	require.NoError(t, err)
+	require.Len(t, outputs, 3)
+	return [3]*Buffer{outputs[0].(*Buffer), outputs[1].(*Buffer), outputs[2].(*Buffer)}
+}
+
+// ---- FusedMultiHeadSDPA tests ----
+
+func TestFusedMultiHeadSDPA_SingleHead(t *testing.T) {
+	// batch=1, numHeads=1, seqLen=2, headDim=2, kvLen=2
+	// Q = [[1, 0], [0, 1]]
+	// K = [[1, 0], [0, 1]]  (identity-like)
+	// V = [[10, 20], [30, 40]]
+	q := []float32{1, 0, 0, 1}
+	k := []float32{1, 0, 0, 1}
+	v := []float32{10, 20, 30, 40}
+
+	qShape := shapes.Make(dtypes.Float32, 1, 1, 2, 2)
+	kShape := shapes.Make(dtypes.Float32, 1, 1, 2, 2)
+	vShape := shapes.Make(dtypes.Float32, 1, 1, 2, 2)
+
+	scale := float64(1.0 / math.Sqrt(2.0)) // 1/sqrt(headDim)
+
+	result := execFusedOpMultiInput(t,
+		[]shapes.Shape{qShape, kShape, vShape},
+		[]interface{}{q, k, v},
+		func(f backends.Function, params []backends.Value) (backends.Value, error) {
+			return f.FusedMultiHeadSDPA(params[0], params[1], params[2], nil, 1, 1, scale, false)
+		},
+	)
+
+	got := result.flat.([]float32)
+	// scores[0][0] = (1*1+0*0)*scale = scale, scores[0][1] = (1*0+0*1)*scale = 0
+	// softmax([scale, 0]) = [exp(scale)/(exp(scale)+1), 1/(exp(scale)+1)]
+	// Output row 0 = softmax_weights @ V
+	// Similarly for row 1.
+	require.Len(t, got, 4)
+	for _, val := range got {
+		assert.False(t, math.IsNaN(float64(val)), "output contains NaN")
+	}
+	// Output should be a weighted avg of V rows, so between min and max of V.
+	for i := range got {
+		assert.GreaterOrEqual(t, got[i], float32(10.0)-1e-3)
+		assert.LessOrEqual(t, got[i], float32(40.0)+1e-3)
+	}
+}
+
+func TestFusedMultiHeadSDPA_Causal(t *testing.T) {
+	// batch=1, numHeads=1, seqLen=2, headDim=1, kvLen=2
+	// With causal mask: position 0 can only attend to position 0.
+	q := []float32{1, 1}
+	k := []float32{1, 1}
+	v := []float32{10, 20}
+
+	qShape := shapes.Make(dtypes.Float32, 1, 1, 2, 1)
+	kShape := shapes.Make(dtypes.Float32, 1, 1, 2, 1)
+	vShape := shapes.Make(dtypes.Float32, 1, 1, 2, 1)
+
+	result := execFusedOpMultiInput(t,
+		[]shapes.Shape{qShape, kShape, vShape},
+		[]interface{}{q, k, v},
+		func(f backends.Function, params []backends.Value) (backends.Value, error) {
+			return f.FusedMultiHeadSDPA(params[0], params[1], params[2], nil, 1, 1, 1.0, true)
+		},
+	)
+
+	got := result.flat.([]float32)
+	// Position 0 can only see position 0 → output = V[0] = 10
+	assert.InDelta(t, 10.0, got[0], fusedTestTol)
+	// Position 1 can see both → softmax([1, 1]) = [0.5, 0.5] → output = 0.5*10+0.5*20 = 15
+	assert.InDelta(t, 15.0, got[1], fusedTestTol)
+}
+
+func TestFusedMultiHeadSDPA_MultiHead(t *testing.T) {
+	// batch=1, numHeads=2, seqLen=1, headDim=1, kvLen=1
+	// Simple case: each head attends to a single key/value.
+	q := []float32{1, 2}           // 2 heads, each with seqLen=1, headDim=1
+	k := []float32{1, 1}           // 2 heads
+	v := []float32{100, 200}       // 2 heads
+
+	qShape := shapes.Make(dtypes.Float32, 1, 2, 1, 1)
+	kShape := shapes.Make(dtypes.Float32, 1, 2, 1, 1)
+	vShape := shapes.Make(dtypes.Float32, 1, 2, 1, 1)
+
+	result := execFusedOpMultiInput(t,
+		[]shapes.Shape{qShape, kShape, vShape},
+		[]interface{}{q, k, v},
+		func(f backends.Function, params []backends.Value) (backends.Value, error) {
+			return f.FusedMultiHeadSDPA(params[0], params[1], params[2], nil, 2, 2, 1.0, false)
+		},
+	)
+
+	got := result.flat.([]float32)
+	// With kvLen=1, attention is just V itself (softmax of single element = 1).
+	assert.InDelta(t, 100.0, got[0], fusedTestTol) // head 0
+	assert.InDelta(t, 200.0, got[1], fusedTestTol) // head 1
+}
+
+func TestFusedMultiHeadSDPA_GQA(t *testing.T) {
+	// batch=1, numHeads=2, numKVHeads=1 (GQA: 2 query heads share 1 KV head)
+	// seqLen=1, kvLen=1, headDim=1
+	q := []float32{1, 2}     // 2 heads
+	k := []float32{1}        // 1 KV head
+	v := []float32{42}       // 1 KV head
+
+	qShape := shapes.Make(dtypes.Float32, 1, 2, 1, 1)
+	kShape := shapes.Make(dtypes.Float32, 1, 1, 1, 1)
+	vShape := shapes.Make(dtypes.Float32, 1, 1, 1, 1)
+
+	result := execFusedOpMultiInput(t,
+		[]shapes.Shape{qShape, kShape, vShape},
+		[]interface{}{q, k, v},
+		func(f backends.Function, params []backends.Value) (backends.Value, error) {
+			return f.FusedMultiHeadSDPA(params[0], params[1], params[2], nil, 2, 1, 1.0, false)
+		},
+	)
+
+	got := result.flat.([]float32)
+	// Both heads attend to the same single KV → output = V = 42 for both.
+	assert.InDelta(t, 42.0, got[0], fusedTestTol)
+	assert.InDelta(t, 42.0, got[1], fusedTestTol)
+}
+
+func TestFusedMultiHeadSDPA_WithMask(t *testing.T) {
+	// batch=1, numHeads=1, seqLen=1, kvLen=2, headDim=1
+	// mask blocks second key position with -inf.
+	q := []float32{1}
+	k := []float32{1, 1}
+	v := []float32{10, 20}
+	mask := []float32{0, float32(math.Inf(-1))} // block second position
+
+	qShape := shapes.Make(dtypes.Float32, 1, 1, 1, 1)
+	kShape := shapes.Make(dtypes.Float32, 1, 1, 2, 1)
+	vShape := shapes.Make(dtypes.Float32, 1, 1, 2, 1)
+	maskShape := shapes.Make(dtypes.Float32, 1, 2)
+
+	result := execFusedOpMultiInput(t,
+		[]shapes.Shape{qShape, kShape, vShape, maskShape},
+		[]interface{}{q, k, v, mask},
+		func(f backends.Function, params []backends.Value) (backends.Value, error) {
+			return f.FusedMultiHeadSDPA(params[0], params[1], params[2], params[3], 1, 1, 1.0, false)
+		},
+	)
+
+	got := result.flat.([]float32)
+	// Only first position visible → output = V[0] = 10
+	assert.InDelta(t, 10.0, got[0], fusedTestTol)
+}
+
+// ---- FusedQKVDense tests ----
+
+func TestFusedQKVDense_Identity(t *testing.T) {
+	// batch=1, inFeatures=3, qDim=2, kvDim=1
+	// wQKV: [qDim+2*kvDim, inFeatures] = [4, 3]
+	// Use identity-like weights for easy verification.
+	x := []float32{1, 2, 3}
+	// wQKV rows: Q row 0, Q row 1, K row 0, V row 0
+	wQKV := []float32{
+		1, 0, 0, // Q[0]: picks x[0] = 1
+		0, 1, 0, // Q[1]: picks x[1] = 2
+		0, 0, 1, // K[0]: picks x[2] = 3
+		1, 1, 1, // V[0]: sum = 6
+	}
+	biasQ := []float32{10, 20}
+	biasK := []float32{100}
+	biasV := []float32{1000}
+
+	xShape := shapes.Make(dtypes.Float32, 1, 3)
+	wShape := shapes.Make(dtypes.Float32, 4, 3)
+	bqShape := shapes.Make(dtypes.Float32, 2)
+	bkShape := shapes.Make(dtypes.Float32, 1)
+	bvShape := shapes.Make(dtypes.Float32, 1)
+
+	results := execFusedOpMultiOutput3(t,
+		[]shapes.Shape{xShape, wShape, bqShape, bkShape, bvShape},
+		[]interface{}{x, wQKV, biasQ, biasK, biasV},
+		func(f backends.Function, params []backends.Value) (backends.Value, backends.Value, backends.Value, error) {
+			return f.FusedQKVDense(params[0], params[1], params[2], params[3], params[4], 2, 1)
+		},
+	)
+
+	qGot := results[0].flat.([]float32)
+	kGot := results[1].flat.([]float32)
+	vGot := results[2].flat.([]float32)
+
+	// Q = x @ wQ^T + biasQ = [1+10, 2+20] = [11, 22]
+	assert.InDelta(t, 11.0, qGot[0], fusedTestTol)
+	assert.InDelta(t, 22.0, qGot[1], fusedTestTol)
+	// K = x @ wK^T + biasK = [3+100] = [103]
+	assert.InDelta(t, 103.0, kGot[0], fusedTestTol)
+	// V = x @ wV^T + biasV = [6+1000] = [1006]
+	assert.InDelta(t, 1006.0, vGot[0], fusedTestTol)
+}
+
+func TestFusedQKVDense_NoBias(t *testing.T) {
+	// batch=2, inFeatures=2, qDim=2, kvDim=1
+	x := []float32{
+		1, 0, // batch 0
+		0, 1, // batch 1
+	}
+	// wQKV: [4, 2]
+	wQKV := []float32{
+		1, 2, // Q[0]
+		3, 4, // Q[1]
+		5, 6, // K[0]
+		7, 8, // V[0]
+	}
+
+	xShape := shapes.Make(dtypes.Float32, 2, 2)
+	wShape := shapes.Make(dtypes.Float32, 4, 2)
+
+	results := execFusedOpMultiOutput3(t,
+		[]shapes.Shape{xShape, wShape},
+		[]interface{}{x, wQKV},
+		func(f backends.Function, params []backends.Value) (backends.Value, backends.Value, backends.Value, error) {
+			return f.FusedQKVDense(params[0], params[1], nil, nil, nil, 2, 1)
+		},
+	)
+
+	qGot := results[0].flat.([]float32)
+	kGot := results[1].flat.([]float32)
+	vGot := results[2].flat.([]float32)
+
+	// Batch 0: x=[1,0]
+	// Q = [1*1+0*2, 1*3+0*4] = [1, 3]
+	// K = [1*5+0*6] = [5]
+	// V = [1*7+0*8] = [7]
+	assert.InDelta(t, 1.0, qGot[0], fusedTestTol)
+	assert.InDelta(t, 3.0, qGot[1], fusedTestTol)
+	assert.InDelta(t, 5.0, kGot[0], fusedTestTol)
+	assert.InDelta(t, 7.0, vGot[0], fusedTestTol)
+
+	// Batch 1: x=[0,1]
+	// Q = [0*1+1*2, 0*3+1*4] = [2, 4]
+	// K = [0*5+1*6] = [6]
+	// V = [0*7+1*8] = [8]
+	assert.InDelta(t, 2.0, qGot[2], fusedTestTol)
+	assert.InDelta(t, 4.0, qGot[3], fusedTestTol)
+	assert.InDelta(t, 6.0, kGot[1], fusedTestTol)
+	assert.InDelta(t, 8.0, vGot[1], fusedTestTol)
+}
+
+func TestFusedQKVDense_EqualDims(t *testing.T) {
+	// When qDim == kvDim, equivalent to 3 separate dense ops.
+	// batch=1, inFeatures=2, qDim=2, kvDim=2
+	x := []float32{1, 1}
+	// wQKV: [6, 2] (qDim+2*kvDim=6 rows)
+	wQKV := []float32{
+		1, 0, // Q[0]
+		0, 1, // Q[1]
+		2, 0, // K[0]
+		0, 2, // K[1]
+		3, 0, // V[0]
+		0, 3, // V[1]
+	}
+
+	xShape := shapes.Make(dtypes.Float32, 1, 2)
+	wShape := shapes.Make(dtypes.Float32, 6, 2)
+
+	results := execFusedOpMultiOutput3(t,
+		[]shapes.Shape{xShape, wShape},
+		[]interface{}{x, wQKV},
+		func(f backends.Function, params []backends.Value) (backends.Value, backends.Value, backends.Value, error) {
+			return f.FusedQKVDense(params[0], params[1], nil, nil, nil, 2, 2)
+		},
+	)
+
+	qGot := results[0].flat.([]float32)
+	kGot := results[1].flat.([]float32)
+	vGot := results[2].flat.([]float32)
+
+	// x=[1,1]
+	// Q = [1, 1], K = [2, 2], V = [3, 3]
+	assert.InDelta(t, 1.0, qGot[0], fusedTestTol)
+	assert.InDelta(t, 1.0, qGot[1], fusedTestTol)
+	assert.InDelta(t, 2.0, kGot[0], fusedTestTol)
+	assert.InDelta(t, 2.0, kGot[1], fusedTestTol)
+	assert.InDelta(t, 3.0, vGot[0], fusedTestTol)
+	assert.InDelta(t, 3.0, vGot[1], fusedTestTol)
+}

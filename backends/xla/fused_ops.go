@@ -29,3 +29,12 @@ func (f *Function) FusedDense(x, weight, bias backends.Value) (backends.Value, e
 func (f *Function) FusedDenseActivation(x, weight, bias backends.Value, activation backends.ActivationType) (backends.Value, error) {
 	return nil, errors.New("FusedDenseActivation not implemented in XLA backend")
 }
+
+func (f *Function) FusedMultiHeadSDPA(q, k, v, mask backends.Value, numHeads, numKVHeads int, scale float64, causal bool) (backends.Value, error) {
+	return nil, errors.New("FusedMultiHeadSDPA not implemented in XLA backend")
+}
+
+func (f *Function) FusedQKVDense(x, wQKV, biasQ, biasK, biasV backends.Value, qDim, kvDim int) (q, k, v backends.Value, err error) {
+	err = errors.New("FusedQKVDense not implemented in XLA backend")
+	return
+}
