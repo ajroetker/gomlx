@@ -16,8 +16,7 @@ func init() {
 	simplego.SetNodeExecutor(backends.OpTypeFusedSoftmax, simplego.RegisterPriorityArch, execSoftmaxHighway)
 	simplego.SetNodeExecutor(backends.OpTypeFusedGelu, simplego.RegisterPriorityArch, execGeluHighway)
 	simplego.SetNodeExecutor(backends.OpTypeFusedLayerNorm, simplego.RegisterPriorityArch, execLayerNormHighway)
-	simplego.SetNodeExecutor(backends.OpTypeFusedDense, simplego.RegisterPriorityArch, execDenseHighway)
-	simplego.SetNodeExecutor(backends.OpTypeFusedDenseActivation, simplego.RegisterPriorityArch, execDenseActivationHighway)
+	simplego.SetNodeExecutor(backends.OpTypeFusedDense, simplego.RegisterPriorityArch, execDenseActivationHighway)
 }
 
 // computeAxisStrides decomposes a shape into (outerSize, axisSize, innerSize) for
@@ -239,7 +238,7 @@ func execDenseActivationHighway(backend *simplego.Backend, node *simplego.Node, 
 	}
 
 	output := simplego.FusedOpOutput(backend, node)
-	act := simplego.DenseActivationParams(node)
+	act := simplego.DenseParams(node)
 
 	inFeatures := x.Shape().Dimensions[x.Shape().Rank()-1]
 	outFeatures := weight.Shape().Dimensions[1]

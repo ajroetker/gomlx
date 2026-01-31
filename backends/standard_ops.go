@@ -7,35 +7,6 @@ import (
 	"github.com/gomlx/gomlx/pkg/core/shapes"
 )
 
-// ActivationType specifies the activation function for fused operations.
-type ActivationType int
-
-const (
-	ActivationNone ActivationType = iota
-	ActivationGelu
-	ActivationRelu
-	ActivationSilu
-	ActivationTanh
-)
-
-// String returns the name of the activation type.
-func (a ActivationType) String() string {
-	switch a {
-	case ActivationNone:
-		return "none"
-	case ActivationGelu:
-		return "gelu"
-	case ActivationRelu:
-		return "relu"
-	case ActivationSilu:
-		return "silu"
-	case ActivationTanh:
-		return "tanh"
-	default:
-		return "unknown"
-	}
-}
-
 // StandardOps lists the bulk of the operations that a backends.Builder must support.
 type StandardOps interface {
 
@@ -660,61 +631,4 @@ type StandardOps interface {
 	//
 	// If either condition, onTrue or onFalse is a scalar, it will be broadcasted to the shape of the other operands.
 	Where(condition, onTrue, onFalse Value) (Value, error)
-
-	// FusedSoftmax computes softmax along the specified axis.
-	// axis: single axis to compute softmax over (negative indexing supported).
-	FusedSoftmax(x Value, axis int) (Value, error)
-
-	// FusedGelu computes Gaussian Error Linear Unit activation.
-	// mode: "exact" or "tanh_approximation".
-	FusedGelu(x Value, mode string) (Value, error)
-
-	// FusedLayerNorm applies layer normalization over specified axes.
-	// gamma and beta can be nil if no learned scale/offset.
-	// epsilon: numerical stability constant (typically 1e-5).
-	FusedLayerNorm(x Value, axes []int, epsilon float64, gamma, beta Value) (Value, error)
-
-	// FusedDense performs fused matmul + bias: y = x @ W + bias.
-	// x: [batch..., in_features], weight: [in_features, out_features...], bias: [out_features...] (nil-able).
-	// Contracts x's last axis with weight's first axis.
-	FusedDense(x, weight, bias Value) (Value, error)
-
-	// FusedDenseActivation performs FusedDense followed by activation in one op.
-	FusedDenseActivation(x, weight, bias Value, activation ActivationType) (Value, error)
-
-	// FusedMultiHeadSDPA computes multi-head scaled dot-product attention.
-	//
-	// output = softmax(Q @ K^T * scale + mask) @ V, computed per-head with GQA support.
-	//
-	// Inputs:
-	//   - q: [batch, numHeads, seqLen, headDim]
-	//   - k: [batch, numKVHeads, kvLen, headDim]
-	//   - v: [batch, numKVHeads, kvLen, headDim]
-	//   - mask: [seqLen, kvLen] (optional, additive mask; nil for no mask)
-	//
-	// Parameters:
-	//   - numHeads: number of query attention heads
-	//   - numKVHeads: number of key/value attention heads (for GQA; numHeads must be divisible by numKVHeads)
-	//   - scale: scaling factor applied to Q @ K^T (typically 1/sqrt(headDim))
-	//   - causal: if true, apply causal (lower-triangular) mask
-	//
-	// Output: [batch, numHeads, seqLen, headDim]
-	FusedMultiHeadSDPA(q, k, v, mask Value, numHeads, numKVHeads int, scale float64, causal bool) (Value, error)
-
-	// FusedQKVDense performs fused QKV projection: a single large matmul followed by
-	// scatter into separate Q, K, V outputs with optional per-projection bias.
-	//
-	// Inputs:
-	//   - x: [batch, inFeatures]
-	//   - wQKV: [qDim+2*kvDim, inFeatures] (Q/K/V weight stacked row-major)
-	//   - biasQ: [qDim] (optional, nil for no bias)
-	//   - biasK: [kvDim] (optional, nil for no bias)
-	//   - biasV: [kvDim] (optional, nil for no bias)
-	//
-	// Parameters:
-	//   - qDim: output dimension for Q projection
-	//   - kvDim: output dimension for K and V projections
-	//
-	// Outputs: q [batch, qDim], k [batch, kvDim], v [batch, kvDim]
-	FusedQKVDense(x, wQKV, biasQ, biasK, biasV Value, qDim, kvDim int) (q, k, v Value, err error)
 }

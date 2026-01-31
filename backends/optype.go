@@ -147,7 +147,6 @@ const (
 	OpTypeFusedLayerNorm
 	OpTypeFusedGelu
 	OpTypeFusedDense
-	OpTypeFusedDenseActivation
 	OpTypeFusedMultiHeadSDPA
 	OpTypeFusedQKVDense
 

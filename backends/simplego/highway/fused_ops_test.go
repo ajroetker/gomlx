@@ -258,7 +258,7 @@ func TestHighwayDense(t *testing.T) {
 		[]shapes.Shape{xShape, wShape, bShape},
 		[]any{x, weight, bias},
 		func(f backends.Function, params []backends.Value) (backends.Value, error) {
-			return f.FusedDense(params[0], params[1], params[2])
+			return f.FusedDense(params[0], params[1], params[2], backends.ActivationNone)
 		},
 	).([]float32)
 
@@ -281,7 +281,7 @@ func TestHighwayDense_NoBias(t *testing.T) {
 		[]shapes.Shape{xShape, wShape},
 		[]any{x, weight},
 		func(f backends.Function, params []backends.Value) (backends.Value, error) {
-			return f.FusedDense(params[0], params[1], nil)
+			return f.FusedDense(params[0], params[1], nil, backends.ActivationNone)
 		},
 	).([]float32)
 
@@ -344,7 +344,7 @@ func TestHighwayDenseActivation(t *testing.T) {
 				[]shapes.Shape{xShape, wShape, bShape},
 				[]any{x, weight, bias},
 				func(f backends.Function, params []backends.Value) (backends.Value, error) {
-					return f.FusedDenseActivation(params[0], params[1], params[2], act)
+					return f.FusedDense(params[0], params[1], params[2], act)
 				},
 			).([]float32)
 			tt.check(t, got)

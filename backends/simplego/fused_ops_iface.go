@@ -42,9 +42,9 @@ func LayerNormParams(node *Node) (axes []int, epsilon float64) {
 	return data.axes, data.epsilon
 }
 
-// DenseActivationParams extracts the activation type from a DenseActivation node.
-func DenseActivationParams(node *Node) backends.ActivationType {
-	return node.data.(*nodeFusedDenseActivation).activation
+// DenseParams extracts the activation type from a FusedDense node.
+func DenseParams(node *Node) backends.ActivationType {
+	return node.data.(*nodeFusedDense).activation
 }
 
 // MultiHeadSDPAParams extracts the parameters from a MultiHeadSDPA node.

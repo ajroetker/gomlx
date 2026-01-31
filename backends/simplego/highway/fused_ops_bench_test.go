@@ -477,7 +477,7 @@ func BenchmarkFusedViaGraph(b *testing.B) {
 		pX, _ := mainFn.Parameter("x", xShape, nil)
 		pW, _ := mainFn.Parameter("w", wShape, nil)
 		pB, _ := mainFn.Parameter("b", bShape, nil)
-		out, _ := mainFn.FusedDense(pX, pW, pB)
+		out, _ := mainFn.FusedDense(pX, pW, pB, backends.ActivationNone)
 		_ = mainFn.Return([]backends.Value{out}, nil)
 		exec, _ := builder.Compile()
 
