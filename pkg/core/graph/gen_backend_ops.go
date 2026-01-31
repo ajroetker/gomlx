@@ -2131,7 +2131,7 @@ func (ni *nodeInputsFusedQKVDense) String() string {
 //
 // Inputs:
 //   - x: [batch, inFeatures]
-//   - wQKV: [qDim+2*kvDim, inFeatures] (Q/K/V weight stacked row-major)
+//   - wQKV: [inFeatures, qDim+2*kvDim] (Q/K/V weights concatenated along last axis)
 //   - biasQ: [qDim] (optional, nil for no bias)
 //   - biasK: [kvDim] (optional, nil for no bias)
 //   - biasV: [kvDim] (optional, nil for no bias)

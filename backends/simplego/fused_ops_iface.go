@@ -59,6 +59,14 @@ func QKVDenseParams(node *Node) (qDim, kvDim int) {
 	return data.qDim, data.kvDim
 }
 
+// QKVDenseOutputBuffers allocates the three output buffers (q, k, v) for a QKVDense node.
+func QKVDenseOutputBuffers(backend *Backend, node *Node) (q, k, v *Buffer) {
+	outShapes := node.multiOutputsShapes
+	return backend.getBufferForShape(outShapes[0]),
+		backend.getBufferForShape(outShapes[1]),
+		backend.getBufferForShape(outShapes[2])
+}
+
 // LayerNormFloat32Fallback is the scalar implementation of LayerNorm for float32.
 // Used by the highway subpackage for non-trailing axis combinations where SIMD
 // acceleration is not applicable.

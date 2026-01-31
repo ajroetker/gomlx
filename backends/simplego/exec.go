@@ -120,7 +120,8 @@ var (
 
 	// multiOutputsNodeExecutors should be populated during initialization for the multi-output ops
 	// implemented. E.g.: RNGBitGenerator.
-	multiOutputsNodeExecutors [backends.OpTypeLast]nodeMultiOutputExecutor
+	multiOutputsNodeExecutors         [backends.OpTypeLast]nodeMultiOutputExecutor
+	multiOutputsNodeExecPriority      [backends.OpTypeLast]registerPriority
 
 	// nodeClosureExecutors should be populated during initialization for ops that call closures.
 	// E.g.: If, While, Sort.
@@ -162,6 +163,19 @@ type NodeExecutor = nodeExecutor
 // This is the exported version of setNodeExecutor for use by subpackages.
 func SetNodeExecutor(opType backends.OpType, priority registerPriority, executor NodeExecutor) {
 	setNodeExecutor(opType, priority, executor)
+}
+
+// MultiOutputNodeExecutor is the exported type for multi-output node executor functions.
+type MultiOutputNodeExecutor = nodeMultiOutputExecutor
+
+// SetMultiOutputsNodeExecutor allows external packages (like highway) to register
+// multi-output node executors with priority-based dispatch.
+func SetMultiOutputsNodeExecutor(opType backends.OpType, priority registerPriority, executor MultiOutputNodeExecutor) {
+	if priority < multiOutputsNodeExecPriority[opType] {
+		return
+	}
+	multiOutputsNodeExecPriority[opType] = priority
+	multiOutputsNodeExecutors[opType] = executor
 }
 
 type opsExecutionType int

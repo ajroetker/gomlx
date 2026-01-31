@@ -395,7 +395,7 @@ func BenchmarkFusedViaGraph(b *testing.B) {
 		builder := backend.Builder("bench_gelu")
 		mainFn := builder.Main()
 		param, _ := mainFn.Parameter("x", shape, nil)
-		out, _ := mainFn.FusedGelu(param, "")
+		out, _ := mainFn.FusedGelu(param, false)
 		_ = mainFn.Return([]backends.Value{out}, nil)
 		exec, _ := builder.Compile()
 

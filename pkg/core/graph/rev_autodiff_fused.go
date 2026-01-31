@@ -322,15 +322,15 @@ func multiHeadSDPAVJP(node, v *Node, _ shapes.Shape) []*Node {
 // qkvDenseVJP computes the VJP for fused QKVDense (multi-output).
 //
 // QKVDense: q = x @ wQ^T + biasQ, k = x @ wK^T + biasK, v = x @ wV^T + biasV
-// where wQKV = [wQ; wK; wV] stacked, wQ is [qDim, inFeatures], etc.
+// where wQKV = [inFeatures, qDim+2*kvDim] with Q, K, V weights concatenated along the last axis.
 //
 // Gradients:
 //
-//	dx = dq @ wQ + dk @ wK + dv @ wV    (sum of all projections)
-//	dwQ = dq^T @ x                       (-> [qDim, inFeatures])
-//	dwK = dk^T @ x                       (-> [kvDim, inFeatures])
-//	dwV = dv^T @ x                       (-> [kvDim, inFeatures])
-//	dwQKV = concat([dwQ, dwK, dwV], axis=0)
+//	dx = dq @ wQ^T + dk @ wK^T + dv @ wV^T  (sum of all projections)
+//	dwQ = x^T @ dq                           (-> [inFeatures, qDim])
+//	dwK = x^T @ dk                           (-> [inFeatures, kvDim])
+//	dwV = x^T @ dv                           (-> [inFeatures, kvDim])
+//	dwQKV = concat([dwQ, dwK, dwV], axis=1)
 //	dbiasQ = sum(dq, batch dims)
 //	dbiasK = sum(dk, batch dims)
 //	dbiasV = sum(dv, batch dims)
@@ -349,28 +349,28 @@ func qkvDenseVJP(node *Node, vjps []*Node, _ shapes.Shape) []*Node {
 	kvDim := params.kvDim
 	inFeatures := x.Shape().Dimensions[lastAxis]
 
-	// wQKV is [qDim+2*kvDim, inFeatures]
-	// Extract wQ, wK, wV slices using backendSlice.
-	wQ := backendSlice(wQKV, []int{0, 0}, []int{qDim, inFeatures}, nil)
-	wK := backendSlice(wQKV, []int{qDim, 0}, []int{qDim + kvDim, inFeatures}, nil)
-	wV := backendSlice(wQKV, []int{qDim + kvDim, 0}, []int{qDim + 2*kvDim, inFeatures}, nil)
+	// wQKV is [inFeatures, qDim+2*kvDim]
+	// Extract wQ, wK, wV slices along the last axis.
+	wQ := backendSlice(wQKV, []int{0, 0}, []int{inFeatures, qDim}, nil)
+	wK := backendSlice(wQKV, []int{0, qDim}, []int{inFeatures, qDim + kvDim}, nil)
+	wV := backendSlice(wQKV, []int{0, qDim + kvDim}, []int{inFeatures, qDim + 2*kvDim}, nil)
 
-	// dx = dq @ wQ + dk @ wK + dv @ wV
-	// dq: [..., qDim], wQ: [qDim, inFeatures] -> contract on qDim -> [..., inFeatures]
-	dx := DotGeneral(dq, []int{lastAxis}, []int{}, wQ, []int{0}, []int{})
-	dx = Add(dx, DotGeneral(dk, []int{lastAxis}, []int{}, wK, []int{0}, []int{}))
-	dx = Add(dx, DotGeneral(dv, []int{lastAxis}, []int{}, wV, []int{0}, []int{}))
+	// dx = dq @ wQ^T + dk @ wK^T + dv @ wV^T
+	// dq: [..., qDim], wQ: [inFeatures, qDim] -> contract dq axis qDim with wQ axis 1 -> [..., inFeatures]
+	dx := DotGeneral(dq, []int{lastAxis}, []int{}, wQ, []int{1}, []int{})
+	dx = Add(dx, DotGeneral(dk, []int{lastAxis}, []int{}, wK, []int{1}, []int{}))
+	dx = Add(dx, DotGeneral(dv, []int{lastAxis}, []int{}, wV, []int{1}, []int{}))
 
-	// dwQKV: concatenate dwQ, dwK, dwV
+	// dwQKV: concatenate dwQ, dwK, dwV along axis 1
 	var batchDims []int
 	for i := 0; i < lastAxis; i++ {
 		batchDims = append(batchDims, i)
 	}
-	// dwQ = x^T @ dq: contract batch dims -> [inFeatures, qDim], then transpose to [qDim, inFeatures]
-	dwQ := DotGeneral(dq, batchDims, []int{}, x, batchDims, []int{})
-	dwK := DotGeneral(dk, batchDims, []int{}, x, batchDims, []int{})
-	dwV := DotGeneral(dv, batchDims, []int{}, x, batchDims, []int{})
-	dwQKV := backendConcatenate(0, dwQ, dwK, dwV)
+	// dwQ = x^T @ dq: contract batch dims -> [inFeatures, qDim]
+	dwQ := DotGeneral(x, batchDims, []int{}, dq, batchDims, []int{})
+	dwK := DotGeneral(x, batchDims, []int{}, dk, batchDims, []int{})
+	dwV := DotGeneral(x, batchDims, []int{}, dv, batchDims, []int{})
+	dwQKV := backendConcatenate(1, dwQ, dwK, dwV)
 
 	results := []*Node{dx, dwQKV}
 

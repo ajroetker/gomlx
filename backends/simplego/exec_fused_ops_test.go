@@ -698,22 +698,24 @@ func TestFusedMultiHeadSDPA_WithMask(t *testing.T) {
 
 func TestFusedQKVDense_Identity(t *testing.T) {
 	// batch=1, inFeatures=3, qDim=2, kvDim=1
-	// wQKV: [qDim+2*kvDim, inFeatures] = [4, 3]
+	// wQKV: [inFeatures, qDim+2*kvDim] = [3, 4]
 	// Use identity-like weights for easy verification.
 	x := []float32{1, 2, 3}
-	// wQKV rows: Q row 0, Q row 1, K row 0, V row 0
+	// wQKV columns: Q[0], Q[1], K[0], V[0]
+	// Row 0 (x[0]): contributes to Q[0]=1, Q[1]=0, K[0]=0, V[0]=1
+	// Row 1 (x[1]): contributes to Q[0]=0, Q[1]=1, K[0]=0, V[0]=1
+	// Row 2 (x[2]): contributes to Q[0]=0, Q[1]=0, K[0]=1, V[0]=1
 	wQKV := []float32{
-		1, 0, 0, // Q[0]: picks x[0] = 1
-		0, 1, 0, // Q[1]: picks x[1] = 2
-		0, 0, 1, // K[0]: picks x[2] = 3
-		1, 1, 1, // V[0]: sum = 6
+		1, 0, 0, 1, // row 0: Q[0]=1, Q[1]=0, K[0]=0, V[0]=1
+		0, 1, 0, 1, // row 1: Q[0]=0, Q[1]=1, K[0]=0, V[0]=1
+		0, 0, 1, 1, // row 2: Q[0]=0, Q[1]=0, K[0]=1, V[0]=1
 	}
 	biasQ := []float32{10, 20}
 	biasK := []float32{100}
 	biasV := []float32{1000}
 
 	xShape := shapes.Make(dtypes.Float32, 1, 3)
-	wShape := shapes.Make(dtypes.Float32, 4, 3)
+	wShape := shapes.Make(dtypes.Float32, 3, 4)
 	bqShape := shapes.Make(dtypes.Float32, 2)
 	bkShape := shapes.Make(dtypes.Float32, 1)
 	bvShape := shapes.Make(dtypes.Float32, 1)
@@ -745,16 +747,15 @@ func TestFusedQKVDense_NoBias(t *testing.T) {
 		1, 0, // batch 0
 		0, 1, // batch 1
 	}
-	// wQKV: [4, 2]
+	// wQKV: [2, 4] (inFeatures=2, totalOut=4)
+	// Columns: Q[0], Q[1], K[0], V[0]
 	wQKV := []float32{
-		1, 2, // Q[0]
-		3, 4, // Q[1]
-		5, 6, // K[0]
-		7, 8, // V[0]
+		1, 3, 5, 7, // row 0 (x[0]): Q[0]=1, Q[1]=3, K[0]=5, V[0]=7
+		2, 4, 6, 8, // row 1 (x[1]): Q[0]=2, Q[1]=4, K[0]=6, V[0]=8
 	}
 
 	xShape := shapes.Make(dtypes.Float32, 2, 2)
-	wShape := shapes.Make(dtypes.Float32, 4, 2)
+	wShape := shapes.Make(dtypes.Float32, 2, 4)
 
 	results := execFusedOpMultiOutput3(t,
 		[]shapes.Shape{xShape, wShape},
@@ -791,18 +792,15 @@ func TestFusedQKVDense_EqualDims(t *testing.T) {
 	// When qDim == kvDim, equivalent to 3 separate dense ops.
 	// batch=1, inFeatures=2, qDim=2, kvDim=2
 	x := []float32{1, 1}
-	// wQKV: [6, 2] (qDim+2*kvDim=6 rows)
+	// wQKV: [2, 6] (inFeatures=2, totalOut=qDim+2*kvDim=6)
+	// Columns: Q[0], Q[1], K[0], K[1], V[0], V[1]
 	wQKV := []float32{
-		1, 0, // Q[0]
-		0, 1, // Q[1]
-		2, 0, // K[0]
-		0, 2, // K[1]
-		3, 0, // V[0]
-		0, 3, // V[1]
+		1, 0, 2, 0, 3, 0, // row 0 (x[0])
+		0, 1, 0, 2, 0, 3, // row 1 (x[1])
 	}
 
 	xShape := shapes.Make(dtypes.Float32, 1, 2)
-	wShape := shapes.Make(dtypes.Float32, 6, 2)
+	wShape := shapes.Make(dtypes.Float32, 2, 6)
 
 	results := execFusedOpMultiOutput3(t,
 		[]shapes.Shape{xShape, wShape},

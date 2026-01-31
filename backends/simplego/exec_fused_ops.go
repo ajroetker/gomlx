@@ -826,7 +826,7 @@ func multiHeadSDPAFloat64(q, k, v, mask, output []float64,
 }
 
 // execFusedQKVDense implements fused QKV projection.
-// x: [batch, inFeatures], wQKV: [qDim+2*kvDim, inFeatures] (row-major, Q/K/V stacked)
+// x: [batch, inFeatures], wQKV: [inFeatures, qDim+2*kvDim] (Q/K/V weights concatenated along last axis)
 // biasQ: [qDim] (opt), biasK: [kvDim] (opt), biasV: [kvDim] (opt)
 // outputs: q [batch, qDim], k [batch, kvDim], v [batch, kvDim]
 func execFusedQKVDense(backend *Backend, node *Node, inputs []*Buffer, inputsOwned []bool) ([]*Buffer, error) {
@@ -905,51 +905,47 @@ func qkvDenseFloat32(x, wQKV, biasQ, biasK, biasV, q, k, v []float32,
 	batchSize, inFeatures, qDim, kvDim int,
 ) {
 	totalOut := qDim + 2*kvDim
-	// wQKV is [totalOut, inFeatures] row-major
+	// wQKV is [inFeatures, totalOut] row-major.
+	// Column layout: [0..qDim) = Q, [qDim..qDim+kvDim) = K, [qDim+kvDim..totalOut) = V.
 	for b := 0; b < batchSize; b++ {
 		xBase := b * inFeatures
 		qBase := b * qDim
 		kBase := b * kvDim
 		vBase := b * kvDim
 
-		// Q = x @ wQ^T + biasQ, where wQ = wQKV[0:qDim, :]
+		// Q = x @ wQ + biasQ, where wQ = wQKV[:, 0:qDim]
 		for o := 0; o < qDim; o++ {
 			var sum float32
-			wBase := o * inFeatures
 			for i := 0; i < inFeatures; i++ {
-				sum += x[xBase+i] * wQKV[wBase+i]
+				sum += x[xBase+i] * wQKV[i*totalOut+o]
 			}
 			if biasQ != nil {
 				sum += biasQ[o]
 			}
 			q[qBase+o] = sum
 		}
-		// K = x @ wK^T + biasK, where wK = wQKV[qDim:qDim+kvDim, :]
+		// K = x @ wK + biasK, where wK = wQKV[:, qDim:qDim+kvDim]
 		for o := 0; o < kvDim; o++ {
 			var sum float32
-			wBase := (qDim + o) * inFeatures
 			for i := 0; i < inFeatures; i++ {
-				sum += x[xBase+i] * wQKV[wBase+i]
+				sum += x[xBase+i] * wQKV[i*totalOut+qDim+o]
 			}
 			if biasK != nil {
 				sum += biasK[o]
 			}
 			k[kBase+o] = sum
 		}
-		// V = x @ wV^T + biasV, where wV = wQKV[qDim+kvDim:, :]
+		// V = x @ wV + biasV, where wV = wQKV[:, qDim+kvDim:]
 		for o := 0; o < kvDim; o++ {
 			var sum float32
-			wBase := (qDim + kvDim + o) * inFeatures
 			for i := 0; i < inFeatures; i++ {
-				sum += x[xBase+i] * wQKV[wBase+i]
+				sum += x[xBase+i] * wQKV[i*totalOut+qDim+kvDim+o]
 			}
 			if biasV != nil {
 				sum += biasV[o]
 			}
 			v[vBase+o] = sum
 		}
-
-		_ = totalOut
 	}
 }
 
@@ -957,6 +953,7 @@ func qkvDenseFloat64(x, wQKV, biasQ, biasK, biasV, q, k, v []float64,
 	batchSize, inFeatures, qDim, kvDim int,
 ) {
 	totalOut := qDim + 2*kvDim
+	// wQKV is [inFeatures, totalOut] row-major.
 	for b := 0; b < batchSize; b++ {
 		xBase := b * inFeatures
 		qBase := b * qDim
@@ -965,9 +962,8 @@ func qkvDenseFloat64(x, wQKV, biasQ, biasK, biasV, q, k, v []float64,
 
 		for o := 0; o < qDim; o++ {
 			var sum float64
-			wBase := o * inFeatures
 			for i := 0; i < inFeatures; i++ {
-				sum += x[xBase+i] * wQKV[wBase+i]
+				sum += x[xBase+i] * wQKV[i*totalOut+o]
 			}
 			if biasQ != nil {
 				sum += biasQ[o]
@@ -976,9 +972,8 @@ func qkvDenseFloat64(x, wQKV, biasQ, biasK, biasV, q, k, v []float64,
 		}
 		for o := 0; o < kvDim; o++ {
 			var sum float64
-			wBase := (qDim + o) * inFeatures
 			for i := 0; i < inFeatures; i++ {
-				sum += x[xBase+i] * wQKV[wBase+i]
+				sum += x[xBase+i] * wQKV[i*totalOut+qDim+o]
 			}
 			if biasK != nil {
 				sum += biasK[o]
@@ -987,16 +982,13 @@ func qkvDenseFloat64(x, wQKV, biasQ, biasK, biasV, q, k, v []float64,
 		}
 		for o := 0; o < kvDim; o++ {
 			var sum float64
-			wBase := (qDim + kvDim + o) * inFeatures
 			for i := 0; i < inFeatures; i++ {
-				sum += x[xBase+i] * wQKV[wBase+i]
+				sum += x[xBase+i] * wQKV[i*totalOut+qDim+kvDim+o]
 			}
 			if biasV != nil {
 				sum += biasV[o]
 			}
 			v[vBase+o] = sum
 		}
-
-		_ = totalOut
 	}
 }

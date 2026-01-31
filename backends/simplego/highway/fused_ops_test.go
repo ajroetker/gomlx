@@ -155,7 +155,7 @@ func TestHighwayGelu(t *testing.T) {
 	shape := shapes.Make(dtypes.Float32, 5)
 
 	got := execFusedOp(t, shape, input, func(f backends.Function, x backends.Value) (backends.Value, error) {
-		return f.FusedGelu(x, "")
+		return f.FusedGelu(x, false)
 	}).([]float32)
 
 	// GELU(0) = 0
@@ -177,7 +177,7 @@ func TestHighwayGelu_Float64(t *testing.T) {
 	shape := shapes.Make(dtypes.Float64, 5)
 
 	got := execFusedOp(t, shape, input, func(f backends.Function, x backends.Value) (backends.Value, error) {
-		return f.FusedGelu(x, "")
+		return f.FusedGelu(x, false)
 	}).([]float64)
 
 	sqrt2Inv := 1.0 / math.Sqrt(2.0)

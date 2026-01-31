@@ -17,6 +17,8 @@ func init() {
 	simplego.SetNodeExecutor(backends.OpTypeFusedGelu, simplego.RegisterPriorityArch, execGeluHighway)
 	simplego.SetNodeExecutor(backends.OpTypeFusedLayerNorm, simplego.RegisterPriorityArch, execLayerNormHighway)
 	simplego.SetNodeExecutor(backends.OpTypeFusedDense, simplego.RegisterPriorityArch, execDenseActivationHighway)
+	simplego.SetNodeExecutor(backends.OpTypeFusedMultiHeadSDPA, simplego.RegisterPriorityArch, execMultiHeadSDPAHighway)
+	simplego.SetMultiOutputsNodeExecutor(backends.OpTypeFusedQKVDense, simplego.RegisterPriorityArch, execQKVDenseHighway)
 }
 
 // computeAxisStrides decomposes a shape into (outerSize, axisSize, innerSize) for
@@ -223,6 +225,132 @@ func execDenseHighway(backend *simplego.Backend, node *simplego.Node, inputs []*
 			batchSize, inFeatures, outFeatures)
 	default:
 		return nil, errors.Errorf("highway Dense: unsupported dtype %s", x.DType())
+	}
+	return output, nil
+}
+
+// execQKVDenseHighway implements SIMD-accelerated fused QKV projection.
+// Weight wQKV is [inFeatures, totalOut] (ONNX convention). We transpose to [totalOut, inFeatures]
+// for nn.QKVDenseAuto which uses MatMulKLastAuto (K-last / PyTorch convention).
+func execQKVDenseHighway(backend *simplego.Backend, node *simplego.Node, inputs []*simplego.Buffer, inputsOwned []bool) ([]*simplego.Buffer, error) {
+	x := inputs[0]
+	wQKV := inputs[1]
+
+	qDim, kvDim := simplego.QKVDenseParams(node)
+	totalOut := qDim + 2*kvDim
+
+	qBuf, kBuf, vBuf := simplego.QKVDenseOutputBuffers(backend, node)
+
+	inFeatures := x.Shape().Dimensions[x.Shape().Rank()-1]
+	batchSize := x.Shape().Size() / inFeatures
+
+	var biasQ, biasK, biasV *simplego.Buffer
+	biasIdx := 2
+	if biasIdx < len(inputs) {
+		biasQ = inputs[biasIdx]
+		biasIdx++
+	}
+	if biasIdx < len(inputs) {
+		biasK = inputs[biasIdx]
+		biasIdx++
+	}
+	if biasIdx < len(inputs) {
+		biasV = inputs[biasIdx]
+	}
+
+	switch x.DType() {
+	case dtypes.Float32:
+		// Transpose wQKV from [inFeatures, totalOut] to [totalOut, inFeatures].
+		wTransposed := make([]float32, inFeatures*totalOut)
+		matmul.Transpose2D(wQKV.Flat().([]float32), inFeatures, totalOut, wTransposed)
+
+		var bqData, bkData, bvData []float32
+		if biasQ != nil {
+			bqData = biasQ.Flat().([]float32)
+		}
+		if biasK != nil {
+			bkData = biasK.Flat().([]float32)
+		}
+		if biasV != nil {
+			bvData = biasV.Flat().([]float32)
+		}
+		nn.QKVDenseAuto(
+			x.Flat().([]float32), wTransposed,
+			bqData, bkData, bvData,
+			qBuf.Flat().([]float32), kBuf.Flat().([]float32), vBuf.Flat().([]float32),
+			batchSize, inFeatures, qDim, kvDim,
+		)
+	case dtypes.Float64:
+		wTransposed := make([]float64, inFeatures*totalOut)
+		matmul.Transpose2D(wQKV.Flat().([]float64), inFeatures, totalOut, wTransposed)
+
+		var bqData, bkData, bvData []float64
+		if biasQ != nil {
+			bqData = biasQ.Flat().([]float64)
+		}
+		if biasK != nil {
+			bkData = biasK.Flat().([]float64)
+		}
+		if biasV != nil {
+			bvData = biasV.Flat().([]float64)
+		}
+		nn.QKVDenseAuto(
+			x.Flat().([]float64), wTransposed,
+			bqData, bkData, bvData,
+			qBuf.Flat().([]float64), kBuf.Flat().([]float64), vBuf.Flat().([]float64),
+			batchSize, inFeatures, qDim, kvDim,
+		)
+	default:
+		return nil, errors.Errorf("highway QKVDense: unsupported dtype %s", x.DType())
+	}
+	return []*simplego.Buffer{qBuf, kBuf, vBuf}, nil
+}
+
+// execMultiHeadSDPAHighway implements SIMD-accelerated multi-head scaled dot-product attention.
+// q: [batch, numHeads, seqLen, headDim], k/v: [batch, numKVHeads, kvLen, headDim]
+// mask: [seqLen, kvLen] (optional, additive)
+// output: [batch, numHeads, seqLen, headDim]
+func execMultiHeadSDPAHighway(backend *simplego.Backend, node *simplego.Node, inputs []*simplego.Buffer, inputsOwned []bool) (*simplego.Buffer, error) {
+	numHeads, numKVHeads, scale, causal := simplego.MultiHeadSDPAParams(node)
+	q := inputs[0]
+	k := inputs[1]
+	v := inputs[2]
+	var mask *simplego.Buffer
+	if len(inputs) > 3 {
+		mask = inputs[3]
+	}
+	output := simplego.FusedOpOutput(backend, node)
+
+	batchSize := q.Shape().Dimensions[0]
+	seqLen := q.Shape().Dimensions[2]
+	kvLen := k.Shape().Dimensions[2]
+	headDim := q.Shape().Dimensions[3]
+
+	switch q.DType() {
+	case dtypes.Float32:
+		var maskData []float32
+		if mask != nil {
+			maskData = mask.Flat().([]float32)
+		}
+		nn.MultiHeadSDPAAuto(
+			q.Flat().([]float32), k.Flat().([]float32), v.Flat().([]float32),
+			maskData, output.Flat().([]float32),
+			batchSize, numHeads, numKVHeads, seqLen, kvLen, headDim,
+			float32(scale), causal,
+		)
+	case dtypes.Float64:
+		var maskData []float64
+		if mask != nil {
+			maskData = mask.Flat().([]float64)
+		}
+		nn.MultiHeadSDPAAuto(
+			q.Flat().([]float64), k.Flat().([]float64), v.Flat().([]float64),
+			maskData, output.Flat().([]float64),
+			batchSize, numHeads, numKVHeads, seqLen, kvLen, headDim,
+			scale, causal,
+		)
+	default:
+		return nil, errors.Errorf("highway MultiHeadSDPA: unsupported dtype %s", q.DType())
 	}
 	return output, nil
 }
