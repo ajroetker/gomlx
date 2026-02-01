@@ -57,12 +57,12 @@ func BenchmarkLinearLayerPattern(b *testing.B) {
 		}
 
 		// Warmup
-		matmul.MatMulAuto(lhs, rhs, out, 11, 1024, 1024)
+		matmul.MatMulAuto(hwyPool, lhs, rhs, out, 11, 1024, 1024)
 
 		flops := float64(2 * 11 * 1024 * 1024)
 		b.ResetTimer()
 		for i := 0; i < b.N; i++ {
-			matmul.MatMulAuto(lhs, rhs, out, 11, 1024, 1024)
+			matmul.MatMulAuto(hwyPool, lhs, rhs, out, 11, 1024, 1024)
 		}
 		b.ReportMetric(flops*float64(b.N)/b.Elapsed().Seconds()/1e9, "GFLOPS")
 	})
@@ -93,12 +93,12 @@ func BenchmarkMatMulSizes(b *testing.B) {
 
 		b.Run(sz.name, func(b *testing.B) {
 			// Warmup
-			matmul.MatMulAuto(lhs, rhs, out, sz.m, sz.n, sz.k)
+			matmul.MatMulAuto(hwyPool, lhs, rhs, out, sz.m, sz.n, sz.k)
 
 			flops := float64(2 * sz.m * sz.n * sz.k)
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
-				matmul.MatMulAuto(lhs, rhs, out, sz.m, sz.n, sz.k)
+				matmul.MatMulAuto(hwyPool, lhs, rhs, out, sz.m, sz.n, sz.k)
 			}
 			b.ReportMetric(flops*float64(b.N)/b.Elapsed().Seconds()/1e9, "GFLOPS")
 		})

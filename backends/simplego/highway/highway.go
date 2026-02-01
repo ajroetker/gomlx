@@ -169,7 +169,7 @@ func matMulFloat32(lhs, rhs, output []float32, batchSize, m, n, k int, pool *wor
 
 	// For single batch, use highway pool for intra-matrix parallelism
 	if batchSize == 1 {
-		matmul.MatMulAutoWithPool(hwyPool, lhs, rhs, output, m, n, k)
+		matmul.MatMulAuto(hwyPool, lhs, rhs, output, m, n, k)
 		return nil
 	}
 
@@ -182,7 +182,7 @@ func matMulFloat32(lhs, rhs, output []float32, batchSize, m, n, k int, pool *wor
 			lhsStart := batchIdx * lhsBatchStride
 			rhsStart := batchIdx * rhsBatchStride
 			outStart := batchIdx * outBatchStride
-			matmul.MatMulAuto(
+			matmul.MatMulAuto(hwyPool,
 				lhs[lhsStart:lhsStart+lhsBatchStride],
 				rhs[rhsStart:rhsStart+rhsBatchStride],
 				output[outStart:outStart+outBatchStride],
@@ -208,7 +208,7 @@ func matMulFloat64(lhs, rhs, output []float64, batchSize, m, n, k int, pool *wor
 
 	// For single batch, use highway pool for intra-matrix parallelism
 	if batchSize == 1 {
-		matmul.MatMulAutoWithPool(hwyPool, lhs, rhs, output, m, n, k)
+		matmul.MatMulAuto(hwyPool, lhs, rhs, output, m, n, k)
 		return nil
 	}
 
@@ -221,7 +221,7 @@ func matMulFloat64(lhs, rhs, output []float64, batchSize, m, n, k int, pool *wor
 			lhsStart := batchIdx * lhsBatchStride
 			rhsStart := batchIdx * rhsBatchStride
 			outStart := batchIdx * outBatchStride
-			matmul.MatMulAuto(
+			matmul.MatMulAuto(hwyPool,
 				lhs[lhsStart:lhsStart+lhsBatchStride],
 				rhs[rhsStart:rhsStart+rhsBatchStride],
 				output[outStart:outStart+outBatchStride],
@@ -254,7 +254,7 @@ func matMulFloat16(lhs, rhs, output []float16.Float16, batchSize, m, n, k int, p
 
 	// For single batch, use highway pool for intra-matrix parallelism
 	if batchSize == 1 {
-		matmul.MatMulAutoWithPool(hwyPool, lhsHwy, rhsHwy, outputHwy, m, n, k)
+		matmul.MatMulAuto(hwyPool, lhsHwy, rhsHwy, outputHwy, m, n, k)
 		return nil
 	}
 
@@ -267,7 +267,7 @@ func matMulFloat16(lhs, rhs, output []float16.Float16, batchSize, m, n, k int, p
 			lhsStart := batchIdx * lhsBatchStride
 			rhsStart := batchIdx * rhsBatchStride
 			outStart := batchIdx * outBatchStride
-			matmul.MatMulAuto(
+			matmul.MatMulAuto(hwyPool,
 				lhsHwy[lhsStart:lhsStart+lhsBatchStride],
 				rhsHwy[rhsStart:rhsStart+rhsBatchStride],
 				outputHwy[outStart:outStart+outBatchStride],
@@ -300,7 +300,7 @@ func matMulBFloat16(lhs, rhs, output []bfloat16.BFloat16, batchSize, m, n, k int
 
 	// For single batch, use highway pool for intra-matrix parallelism
 	if batchSize == 1 {
-		matmul.MatMulAutoWithPool(hwyPool, lhsHwy, rhsHwy, outputHwy, m, n, k)
+		matmul.MatMulAuto(hwyPool, lhsHwy, rhsHwy, outputHwy, m, n, k)
 		return nil
 	}
 
@@ -313,7 +313,7 @@ func matMulBFloat16(lhs, rhs, output []bfloat16.BFloat16, batchSize, m, n, k int
 			lhsStart := batchIdx * lhsBatchStride
 			rhsStart := batchIdx * rhsBatchStride
 			outStart := batchIdx * outBatchStride
-			matmul.MatMulAuto(
+			matmul.MatMulAuto(hwyPool,
 				lhsHwy[lhsStart:lhsStart+lhsBatchStride],
 				rhsHwy[rhsStart:rhsStart+rhsBatchStride],
 				outputHwy[outStart:outStart+outBatchStride],
@@ -394,7 +394,7 @@ func matMulKLastFloat32(lhs, rhs, output []float32, batchSize, m, n, k int, pool
 
 	// For single batch, use highway pool for intra-matrix parallelism
 	if batchSize == 1 {
-		matmul.MatMulKLastAutoWithPool(hwyPool, lhs, rhs, output, m, n, k)
+		matmul.MatMulKLastAuto(hwyPool, lhs, rhs, output, m, n, k)
 		return nil
 	}
 
@@ -407,7 +407,7 @@ func matMulKLastFloat32(lhs, rhs, output []float32, batchSize, m, n, k int, pool
 			lhsStart := batchIdx * lhsBatchStride
 			rhsStart := batchIdx * rhsBatchStride
 			outStart := batchIdx * outBatchStride
-			matmul.MatMulKLastAuto(
+			matmul.MatMulKLastAuto(hwyPool,
 				lhs[lhsStart:lhsStart+lhsBatchStride],
 				rhs[rhsStart:rhsStart+rhsBatchStride],
 				output[outStart:outStart+outBatchStride],
@@ -433,7 +433,7 @@ func matMulKLastFloat64(lhs, rhs, output []float64, batchSize, m, n, k int, pool
 
 	// For single batch, use highway pool for intra-matrix parallelism
 	if batchSize == 1 {
-		matmul.MatMulKLastAutoWithPool(hwyPool, lhs, rhs, output, m, n, k)
+		matmul.MatMulKLastAuto(hwyPool, lhs, rhs, output, m, n, k)
 		return nil
 	}
 
@@ -446,7 +446,7 @@ func matMulKLastFloat64(lhs, rhs, output []float64, batchSize, m, n, k int, pool
 			lhsStart := batchIdx * lhsBatchStride
 			rhsStart := batchIdx * rhsBatchStride
 			outStart := batchIdx * outBatchStride
-			matmul.MatMulKLastAuto(
+			matmul.MatMulKLastAuto(hwyPool,
 				lhs[lhsStart:lhsStart+lhsBatchStride],
 				rhs[rhsStart:rhsStart+rhsBatchStride],
 				output[outStart:outStart+outBatchStride],
@@ -477,7 +477,7 @@ func matMulKLastFloat16(lhs, rhs, output []float16.Float16, batchSize, m, n, k i
 
 	// For single batch, use highway pool for intra-matrix parallelism
 	if batchSize == 1 {
-		matmul.MatMulKLastAutoWithPool(hwyPool, lhsHwy, rhsHwy, outputHwy, m, n, k)
+		matmul.MatMulKLastAuto(hwyPool, lhsHwy, rhsHwy, outputHwy, m, n, k)
 		return nil
 	}
 
@@ -490,7 +490,7 @@ func matMulKLastFloat16(lhs, rhs, output []float16.Float16, batchSize, m, n, k i
 			lhsStart := batchIdx * lhsBatchStride
 			rhsStart := batchIdx * rhsBatchStride
 			outStart := batchIdx * outBatchStride
-			matmul.MatMulKLastAuto(
+			matmul.MatMulKLastAuto(hwyPool,
 				lhsHwy[lhsStart:lhsStart+lhsBatchStride],
 				rhsHwy[rhsStart:rhsStart+rhsBatchStride],
 				outputHwy[outStart:outStart+outBatchStride],
@@ -521,7 +521,7 @@ func matMulKLastBFloat16(lhs, rhs, output []bfloat16.BFloat16, batchSize, m, n, 
 
 	// For single batch, use highway pool for intra-matrix parallelism
 	if batchSize == 1 {
-		matmul.MatMulKLastAutoWithPool(hwyPool, lhsHwy, rhsHwy, outputHwy, m, n, k)
+		matmul.MatMulKLastAuto(hwyPool, lhsHwy, rhsHwy, outputHwy, m, n, k)
 		return nil
 	}
 
@@ -534,7 +534,7 @@ func matMulKLastBFloat16(lhs, rhs, output []bfloat16.BFloat16, batchSize, m, n, 
 			lhsStart := batchIdx * lhsBatchStride
 			rhsStart := batchIdx * rhsBatchStride
 			outStart := batchIdx * outBatchStride
-			matmul.MatMulKLastAuto(
+			matmul.MatMulKLastAuto(hwyPool,
 				lhsHwy[lhsStart:lhsStart+lhsBatchStride],
 				rhsHwy[rhsStart:rhsStart+rhsBatchStride],
 				outputHwy[outStart:outStart+outBatchStride],

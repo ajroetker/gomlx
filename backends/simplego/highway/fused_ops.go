@@ -212,7 +212,7 @@ func execDenseHighway(backend *simplego.Backend, node *simplego.Node, inputs []*
 		// Transpose weight from [in, out] to [out, in] for nn.DenseAuto.
 		wTransposed := make([]float32, inFeatures*outFeatures)
 		matmul.Transpose2D(weight.Flat().([]float32), inFeatures, outFeatures, wTransposed)
-		nn.DenseAuto(x.Flat().([]float32), wTransposed, biasData, output.Flat().([]float32),
+		nn.DenseAuto(hwyPool, x.Flat().([]float32), wTransposed, biasData, output.Flat().([]float32),
 			batchSize, inFeatures, outFeatures)
 	case dtypes.Float64:
 		var biasData []float64
@@ -221,7 +221,7 @@ func execDenseHighway(backend *simplego.Backend, node *simplego.Node, inputs []*
 		}
 		wTransposed := make([]float64, inFeatures*outFeatures)
 		matmul.Transpose2D(weight.Flat().([]float64), inFeatures, outFeatures, wTransposed)
-		nn.DenseAuto(x.Flat().([]float64), wTransposed, biasData, output.Flat().([]float64),
+		nn.DenseAuto(hwyPool, x.Flat().([]float64), wTransposed, biasData, output.Flat().([]float64),
 			batchSize, inFeatures, outFeatures)
 	default:
 		return nil, errors.Errorf("highway Dense: unsupported dtype %s", x.DType())
@@ -274,7 +274,7 @@ func execQKVDenseHighway(backend *simplego.Backend, node *simplego.Node, inputs 
 		if biasV != nil {
 			bvData = biasV.Flat().([]float32)
 		}
-		nn.QKVDenseAuto(
+		nn.QKVDenseAuto(hwyPool,
 			x.Flat().([]float32), wTransposed,
 			bqData, bkData, bvData,
 			qBuf.Flat().([]float32), kBuf.Flat().([]float32), vBuf.Flat().([]float32),
@@ -294,7 +294,7 @@ func execQKVDenseHighway(backend *simplego.Backend, node *simplego.Node, inputs 
 		if biasV != nil {
 			bvData = biasV.Flat().([]float64)
 		}
-		nn.QKVDenseAuto(
+		nn.QKVDenseAuto(hwyPool,
 			x.Flat().([]float64), wTransposed,
 			bqData, bkData, bvData,
 			qBuf.Flat().([]float64), kBuf.Flat().([]float64), vBuf.Flat().([]float64),
@@ -362,7 +362,7 @@ func execMultiHeadSDPAHighway(backend *simplego.Backend, node *simplego.Node, in
 		if mask != nil {
 			maskData = mask.Flat().([]float32)
 		}
-		nn.MultiHeadSDPAAuto(
+		nn.MultiHeadSDPAAuto(hwyPool,
 			q.Flat().([]float32), k.Flat().([]float32), v.Flat().([]float32),
 			maskData, output.Flat().([]float32),
 			batchSize, numHeads, numKVHeads, seqLen, kvLen, headDim,
@@ -374,7 +374,7 @@ func execMultiHeadSDPAHighway(backend *simplego.Backend, node *simplego.Node, in
 		if mask != nil {
 			maskData = mask.Flat().([]float64)
 		}
-		nn.MultiHeadSDPAAuto(
+		nn.MultiHeadSDPAAuto(hwyPool,
 			q.Flat().([]float64), k.Flat().([]float64), v.Flat().([]float64),
 			maskData, output.Flat().([]float64),
 			batchSize, numHeads, numKVHeads, seqLen, kvLen, headDim,
@@ -419,7 +419,7 @@ func execDenseActivationHighway(backend *simplego.Backend, node *simplego.Node, 
 		// Transpose weight from [in, out] to [out, in] for nn.DenseActivationAuto.
 		wTransposed := make([]float32, inFeatures*outFeatures)
 		matmul.Transpose2D(weight.Flat().([]float32), inFeatures, outFeatures, wTransposed)
-		nn.DenseActivationAuto(x.Flat().([]float32), wTransposed, biasData, output.Flat().([]float32),
+		nn.DenseActivationAuto(hwyPool, x.Flat().([]float32), wTransposed, biasData, output.Flat().([]float32),
 			batchSize, inFeatures, outFeatures, nnAct)
 	case dtypes.Float64:
 		var biasData []float64
@@ -428,7 +428,7 @@ func execDenseActivationHighway(backend *simplego.Backend, node *simplego.Node, 
 		}
 		wTransposed := make([]float64, inFeatures*outFeatures)
 		matmul.Transpose2D(weight.Flat().([]float64), inFeatures, outFeatures, wTransposed)
-		nn.DenseActivationAuto(x.Flat().([]float64), wTransposed, biasData, output.Flat().([]float64),
+		nn.DenseActivationAuto(hwyPool, x.Flat().([]float64), wTransposed, biasData, output.Flat().([]float64),
 			batchSize, inFeatures, outFeatures, nnAct)
 	default:
 		return nil, errors.Errorf("highway DenseActivation: unsupported dtype %s", x.DType())

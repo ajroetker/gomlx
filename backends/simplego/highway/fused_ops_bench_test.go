@@ -327,11 +327,11 @@ func BenchmarkFusedDense(b *testing.B) {
 		b.Run(fmt.Sprintf("Highway/%s", sz.name), func(b *testing.B) {
 			output := make([]float32, sz.batch*sz.outFeatures)
 			// Warmup
-			nn.DenseAuto(xData, wData, biasData, output, sz.batch, sz.inFeatures, sz.outFeatures)
+			nn.DenseAuto(hwyPool, xData, wData, biasData, output, sz.batch, sz.inFeatures, sz.outFeatures)
 			flops := float64(2*sz.batch*sz.inFeatures*sz.outFeatures + sz.batch*sz.outFeatures)
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
-				nn.DenseAuto(xData, wData, biasData, output, sz.batch, sz.inFeatures, sz.outFeatures)
+				nn.DenseAuto(hwyPool, xData, wData, biasData, output, sz.batch, sz.inFeatures, sz.outFeatures)
 			}
 			b.ReportMetric(flops*float64(b.N)/b.Elapsed().Seconds()/1e9, "GFLOPS")
 		})
