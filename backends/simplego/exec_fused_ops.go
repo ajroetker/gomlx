@@ -296,13 +296,15 @@ func arbitraryAxesLayerNorm[T float32 | float64](inData, outData, gammaData, bet
 }
 
 // execFusedDense implements y = activation(matmul + bias).
+// inputs layout: [dotResult, x, weight, bias?]
 // inputs[0] is the DotGeneral result (matmul already computed by the backend).
-// inputs[1] is the optional bias.
+// inputs[1] is x, inputs[2] is weight (unused by this executor; used by highway).
+// inputs[3] is the optional bias.
 func execFusedDense(backend *Backend, node *Node, inputs []*Buffer, inputsOwned []bool) (*Buffer, error) {
 	matmul := inputs[0]
 	var bias *Buffer
-	if len(inputs) > 1 {
-		bias = inputs[1]
+	if len(inputs) > 3 {
+		bias = inputs[3]
 	}
 
 	data := node.data.(*nodeFusedDense)
@@ -379,9 +381,37 @@ func applyActivation[T float32 | float64](backend *Backend, data []T, activation
 	}
 }
 
+// computeMaskStrides returns (batchStride, headStride) for indexing into a mask
+// tensor based on its rank. Dimensions of size 1 are broadcast (stride 0).
+//
+//	rank 2: [seqLen, kvLen]                     → (0, 0)
+//	rank 3: [batch, seqLen, kvLen]              → (seqLen*kvLen, 0) or (0, 0) if dim[0]==1
+//	rank 4: [batch, heads, seqLen, kvLen]       → strides computed per dim
+func computeMaskStrides(dims []int) (batchStride, headStride int) {
+	switch len(dims) {
+	case 2:
+		return 0, 0
+	case 3:
+		if dims[0] <= 1 {
+			return 0, 0
+		}
+		return dims[1] * dims[2], 0
+	case 4:
+		if dims[0] > 1 {
+			batchStride = dims[1] * dims[2] * dims[3]
+		}
+		if dims[1] > 1 {
+			headStride = dims[2] * dims[3]
+		}
+		return batchStride, headStride
+	default:
+		return 0, 0
+	}
+}
+
 // execFusedMultiHeadSDPA implements multi-head scaled dot-product attention.
 // q: [batch, numHeads, seqLen, headDim], k/v: [batch, numKVHeads, kvLen, headDim]
-// mask: [seqLen, kvLen] (optional, additive)
+// mask: optional additive mask of rank 2–4 (broadcasting via strides)
 // output: [batch, numHeads, seqLen, headDim]
 func execFusedMultiHeadSDPA(backend *Backend, node *Node, inputs []*Buffer, inputsOwned []bool) (*Buffer, error) {
 	data := node.data.(*nodeFusedMultiHeadSDPA)
@@ -394,6 +424,12 @@ func execFusedMultiHeadSDPA(backend *Backend, node *Node, inputs []*Buffer, inpu
 	}
 	output := backend.getBufferForShape(node.shape)
 
+	// Compute mask strides for broadcasting.
+	var maskBatchStride, maskHeadStride int
+	if mask != nil {
+		maskBatchStride, maskHeadStride = computeMaskStrides(mask.shape.Dimensions)
+	}
+
 	switch q.shape.DType {
 	case dtypes.Float32:
 		var maskData []float32
@@ -404,6 +440,7 @@ func execFusedMultiHeadSDPA(backend *Backend, node *Node, inputs []*Buffer, inpu
 			q.flat.([]float32), k.flat.([]float32), v.flat.([]float32), maskData, output.flat.([]float32),
 			q.shape.Dimensions[0], data.numHeads, data.numKVHeads,
 			q.shape.Dimensions[2], k.shape.Dimensions[2], q.shape.Dimensions[3],
+			maskBatchStride, maskHeadStride,
 			float32(data.scale), data.causal,
 		)
 	case dtypes.Float64:
@@ -415,6 +452,7 @@ func execFusedMultiHeadSDPA(backend *Backend, node *Node, inputs []*Buffer, inpu
 			q.flat.([]float64), k.flat.([]float64), v.flat.([]float64), maskData, output.flat.([]float64),
 			q.shape.Dimensions[0], data.numHeads, data.numKVHeads,
 			q.shape.Dimensions[2], k.shape.Dimensions[2], q.shape.Dimensions[3],
+			maskBatchStride, maskHeadStride,
 			data.scale, data.causal,
 		)
 	default:
@@ -471,12 +509,14 @@ func sdpaFloat32(q, k, v, mask, scores, output []float32, seqLen, kvLen, headDim
 
 func multiHeadSDPAFloat32(q, k, v, mask, output []float32,
 	batchSize, numHeads, numKVHeads, seqLen, kvLen, headDim int,
+	maskBatchStride, maskHeadStride int,
 	scale float32, causal bool,
 ) {
 	headsPerKV := numHeads / numKVHeads
 	scores := make([]float32, seqLen*kvLen)
 	headSize := seqLen * headDim
 	kvHeadSize := kvLen * headDim
+	maskSliceLen := seqLen * kvLen
 	for b := 0; b < batchSize; b++ {
 		for h := 0; h < numHeads; h++ {
 			kvH := h / headsPerKV
@@ -484,9 +524,14 @@ func multiHeadSDPAFloat32(q, k, v, mask, output []float32,
 			kOff := (b*numKVHeads + kvH) * kvHeadSize
 			vOff := kOff
 			oOff := qOff
+			var maskSlice []float32
+			if mask != nil {
+				maskOff := b*maskBatchStride + h*maskHeadStride
+				maskSlice = mask[maskOff : maskOff+maskSliceLen]
+			}
 			sdpaFloat32(
 				q[qOff:qOff+headSize], k[kOff:kOff+kvHeadSize], v[vOff:vOff+kvHeadSize],
-				mask, scores, output[oOff:oOff+headSize],
+				maskSlice, scores, output[oOff:oOff+headSize],
 				seqLen, kvLen, headDim, scale, causal,
 			)
 		}
@@ -537,12 +582,14 @@ func sdpaFloat64(q, k, v, mask, scores, output []float64, seqLen, kvLen, headDim
 
 func multiHeadSDPAFloat64(q, k, v, mask, output []float64,
 	batchSize, numHeads, numKVHeads, seqLen, kvLen, headDim int,
+	maskBatchStride, maskHeadStride int,
 	scale float64, causal bool,
 ) {
 	headsPerKV := numHeads / numKVHeads
 	scores := make([]float64, seqLen*kvLen)
 	headSize := seqLen * headDim
 	kvHeadSize := kvLen * headDim
+	maskSliceLen := seqLen * kvLen
 	for b := 0; b < batchSize; b++ {
 		for h := 0; h < numHeads; h++ {
 			kvH := h / headsPerKV
@@ -550,9 +597,14 @@ func multiHeadSDPAFloat64(q, k, v, mask, output []float64,
 			kOff := (b*numKVHeads + kvH) * kvHeadSize
 			vOff := kOff
 			oOff := qOff
+			var maskSlice []float64
+			if mask != nil {
+				maskOff := b*maskBatchStride + h*maskHeadStride
+				maskSlice = mask[maskOff : maskOff+maskSliceLen]
+			}
 			sdpaFloat64(
 				q[qOff:qOff+headSize], k[kOff:kOff+kvHeadSize], v[vOff:vOff+kvHeadSize],
-				mask, scores, output[oOff:oOff+headSize],
+				maskSlice, scores, output[oOff:oOff+headSize],
 				seqLen, kvLen, headDim, scale, causal,
 			)
 		}

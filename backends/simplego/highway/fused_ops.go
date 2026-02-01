@@ -306,9 +306,33 @@ func execQKVDenseHighway(backend *simplego.Backend, node *simplego.Node, inputs 
 	return []*simplego.Buffer{qBuf, kBuf, vBuf}, nil
 }
 
+// computeMaskStrides returns (batchStride, headStride) for indexing into a mask
+// tensor based on its rank. Dimensions of size 1 are broadcast (stride 0).
+func computeMaskStrides(dims []int) (batchStride, headStride int) {
+	switch len(dims) {
+	case 2:
+		return 0, 0
+	case 3:
+		if dims[0] <= 1 {
+			return 0, 0
+		}
+		return dims[1] * dims[2], 0
+	case 4:
+		if dims[0] > 1 {
+			batchStride = dims[1] * dims[2] * dims[3]
+		}
+		if dims[1] > 1 {
+			headStride = dims[2] * dims[3]
+		}
+		return batchStride, headStride
+	default:
+		return 0, 0
+	}
+}
+
 // execMultiHeadSDPAHighway implements SIMD-accelerated multi-head scaled dot-product attention.
 // q: [batch, numHeads, seqLen, headDim], k/v: [batch, numKVHeads, kvLen, headDim]
-// mask: [seqLen, kvLen] (optional, additive)
+// mask: optional additive mask of rank 2–4 (broadcasting via strides)
 // output: [batch, numHeads, seqLen, headDim]
 func execMultiHeadSDPAHighway(backend *simplego.Backend, node *simplego.Node, inputs []*simplego.Buffer, inputsOwned []bool) (*simplego.Buffer, error) {
 	numHeads, numKVHeads, scale, causal := simplego.MultiHeadSDPAParams(node)
@@ -326,6 +350,12 @@ func execMultiHeadSDPAHighway(backend *simplego.Backend, node *simplego.Node, in
 	kvLen := k.Shape().Dimensions[2]
 	headDim := q.Shape().Dimensions[3]
 
+	// Compute mask strides for broadcasting.
+	var maskBatchStride, maskHeadStride int
+	if mask != nil {
+		maskBatchStride, maskHeadStride = computeMaskStrides(mask.Shape().Dimensions)
+	}
+
 	switch q.DType() {
 	case dtypes.Float32:
 		var maskData []float32
@@ -336,6 +366,7 @@ func execMultiHeadSDPAHighway(backend *simplego.Backend, node *simplego.Node, in
 			q.Flat().([]float32), k.Flat().([]float32), v.Flat().([]float32),
 			maskData, output.Flat().([]float32),
 			batchSize, numHeads, numKVHeads, seqLen, kvLen, headDim,
+			maskBatchStride, maskHeadStride,
 			float32(scale), causal,
 		)
 	case dtypes.Float64:
@@ -347,6 +378,7 @@ func execMultiHeadSDPAHighway(backend *simplego.Backend, node *simplego.Node, in
 			q.Flat().([]float64), k.Flat().([]float64), v.Flat().([]float64),
 			maskData, output.Flat().([]float64),
 			batchSize, numHeads, numKVHeads, seqLen, kvLen, headDim,
+			maskBatchStride, maskHeadStride,
 			scale, causal,
 		)
 	default:
@@ -357,12 +389,14 @@ func execMultiHeadSDPAHighway(backend *simplego.Backend, node *simplego.Node, in
 
 // execDenseActivationHighway implements SIMD-accelerated dense + activation: y = act(x @ W + b).
 // Delegates to nn.DenseActivationAuto which fuses the matmul, bias add, and activation.
+// inputs layout: [dotResult, x, weight, bias?]
+// We ignore dotResult (inputs[0]) and redo the fused matmul+bias+activation from x and weight.
 func execDenseActivationHighway(backend *simplego.Backend, node *simplego.Node, inputs []*simplego.Buffer, inputsOwned []bool) (*simplego.Buffer, error) {
-	x := inputs[0]
-	weight := inputs[1]
+	x := inputs[1]
+	weight := inputs[2]
 	var bias *simplego.Buffer
-	if len(inputs) > 2 {
-		bias = inputs[2]
+	if len(inputs) > 3 {
+		bias = inputs[3]
 	}
 
 	output := simplego.FusedOpOutput(backend, node)
