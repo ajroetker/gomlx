@@ -7,32 +7,31 @@ import (
 
 	"github.com/gomlx/gomlx/backends"
 	"github.com/gomlx/gomlx/internal/exceptions"
-	. "github.com/gomlx/gomlx/internal/exceptions"
 	"github.com/gomlx/gomlx/pkg/core/shapes"
 )
 
-// FusedSoftmax computes softmax along the specified axis.
+// BackendFusedSoftmax computes softmax along the specified axis.
 // Internal: prefer graph.Softmax which handles fallback and gradients.
-func FusedSoftmax(x *Node, axis int) *Node { return backendFusedSoftmax(x, axis) }
+func BackendFusedSoftmax(x *Node, axis int) *Node { return backendFusedSoftmax(x, axis) }
 
-// FusedGelu computes GELU activation (exact or approximate).
+// BackendFusedGelu computes GELU activation (exact or approximate).
 // Internal: prefer activations.Apply which handles fallback and gradients.
-func FusedGelu(x *Node, exact bool) *Node { return backendFusedGelu(x, exact) }
+func BackendFusedGelu(x *Node, exact bool) *Node { return backendFusedGelu(x, exact) }
 
-// FusedLayerNorm applies layer normalization. gamma and beta are optional (nil to skip).
+// BackendFusedLayerNorm applies layer normalization. gamma and beta are optional (nil to skip).
 // Internal: prefer nn.LayerNorm which handles fallback and gradients.
-func FusedLayerNorm(x *Node, axes []int, epsilon float64, gamma, beta *Node) *Node {
+func BackendFusedLayerNorm(x *Node, axes []int, epsilon float64, gamma, beta *Node) *Node {
 	return backendFusedLayerNorm(x, axes, epsilon, gamma, beta)
 }
 
-// FusedDense performs fused matmul + optional bias + optional activation.
+// BackendFusedDense performs fused matmul + optional bias + optional activation.
 // Internal: prefer nn.Dense which handles fallback and gradients.
-func FusedDense(x, weight, bias *Node, activation backends.ActivationType) *Node {
+func BackendFusedDense(x, weight, bias *Node, activation backends.ActivationType) *Node {
 	return backendFusedDense(x, weight, bias, activation)
 }
 
 // FusedMultiHeadSDPA computes multi-head scaled dot-product attention.
-// Internal: prefer the FusedOpCaller wrapper in layers which handles fallback and gradients.
+// Internal: prefer the InternalFusedOpCaller wrapper in layers which handles fallback and gradients.
 func FusedMultiHeadSDPA(q, k, v, mask *Node, numHeads, numKVHeads int, scale float64, causal bool) *Node {
 	return backendFusedMultiHeadSDPA(q, k, v, mask, numHeads, numKVHeads, scale, causal)
 }
@@ -43,33 +42,42 @@ func FusedQKVDense(x, wQKV, biasQ, biasK, biasV *Node, qDim, kvDim int) (q, k, v
 	return backendFusedQKVDense(x, wQKV, biasQ, biasK, biasV, qDim, kvDim)
 }
 
-// FusedOpCaller attempts to call fused, and if it panics with
-// backends.ErrUnsupportedDType, falls back to decomposed. Any other panic is
-// re-thrown — this prevents real bugs in fused op implementations from being
-// silently swallowed.
+// InternalFusedOpCaller attempts to call fused, and if it panics with
+// backends.ErrNotImplemented, falls back to the decomposed version. Any other
+// panic is re-thrown — this prevents real bugs in fused op implementations from
+// being silently swallowed.
 //
-// When the fused call succeeds, the decomposed version is also built and stored
-// as the VJP alternate output, so that reverse-mode autodiff can compute
-// gradients through the decomposed graph without hand-written VJPs.
-func FusedOpCaller(fused, decomposed func() *Node) *Node {
+// Internal: this is used by higher-level wrappers (graph.Softmax, nn.Dense,
+// nn.LayerNorm) that pair a fused backend call with a decomposed fallback.
+//
+// When the fused call succeeds, the decomposed version is also stored as the
+// VJP alternate output, so that reverse-mode autodiff can compute gradients
+// through the decomposed graph without hand-written VJPs.
+func InternalFusedOpCaller(fused, decomposed func() *Node) *Node {
+	// Build decomposed output first so it has a lower nodeIdx than the fused
+	// node. The gradient loop iterates from output down to 0, so it will
+	// visit the fused node first and transfer its VJP to the decomposed
+	// output, which is then processed normally.
+	decomposedOutput := decomposed()
+
 	var output *Node
 	err := exceptions.TryCatch[error](func() {
 		output = fused()
 	})
 	if err != nil {
-		if errors.Is(err, backends.ErrUnsupportedDType) {
-			// Expected: fused op doesn't support this dtype; fall back to decomposed.
-			return decomposed()
+		if errors.Is(err, backends.ErrNotImplemented) {
+			// Expected: fused op doesn't support this config; fall back to decomposed.
+			return decomposedOutput
 		}
 		// Unexpected error — re-panic so it surfaces instead of being silently masked.
 		panic(err)
 	}
 	// Store decomposed version for VJP computation; dead-code-eliminated if unused.
-	output.vjpAlternateOutput = decomposed()
+	output.vjpAlternateOutput = decomposedOutput
 	return output
 }
 
-// FusedOpCallerMulti is the multi-output counterpart of FusedOpCaller.
+// FusedOpCallerMulti is the multi-output counterpart of InternalFusedOpCaller.
 // It handles fused ops that return multiple outputs (e.g. FusedQKVDense returning q, k, v).
 //
 // When the fused call succeeds, the decomposed version is also built and stored
@@ -81,7 +89,7 @@ func FusedOpCallerMulti(fused, decomposed func() []*Node) []*Node {
 		outputs = fused()
 	})
 	if err != nil {
-		if errors.Is(err, backends.ErrUnsupportedDType) {
+		if errors.Is(err, backends.ErrNotImplemented) {
 			return decomposed()
 		}
 		panic(err)
@@ -155,7 +163,7 @@ func reverseAutodiffAlternate(alt *Node, fusedInputs []*Node, accVJP *Node, outp
 			var found bool
 			vjpFn, found = VJPRegistration[node.Type()]
 			if !found {
-				Panicf("reverseAutodiffAlternate: node %s has type %q with no gradient defined", node, node.Type())
+				exceptions.Panicf("reverseAutodiffAlternate: node %s has type %q with no gradient defined", node, node.Type())
 			}
 		}
 
