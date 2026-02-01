@@ -47,7 +47,11 @@ var (
 		"Sign",
 		"ShiftLeft", "ShiftRightArithmetic", "ShiftRightLogical",
 		"Slice",
-		"Transpose", "Where")
+		"Transpose", "Where",
+
+		// Fused ops: exported wrappers with "Internal:" comments are hand-written in fused_ops.go.
+		"FusedDense", "FusedGelu", "FusedLayerNorm", "FusedSoftmax",
+		"FusedMultiHeadSDPA", "FusedQKVDense")
 
 	// methodsNotGenerated get a NodeType but no auto-generated wrapper
 	// (hand-written implementations).
@@ -113,9 +117,7 @@ func buildMethodInfo() (methods []*MethodInfo) {
 					mi.NillableInputs = append(mi.NillableInputs, param.Name)
 					pi.ConvertStatement = fmt.Sprintf("%sVal", param.Name)
 					pi.Format = "%s"
-					pi.FormatValue = fmt.Sprintf(
-						`func() string { if ni.%s != nil { return fmt.Sprintf("[#%%d]", ni.%s.Id()) }; return "nil" }()`,
-						param.Name, param.Name)
+					pi.FormatValue = fmt.Sprintf("strNillableNode(ni.%s)", param.Name)
 				} else {
 					pi.ConvertStatement = fmt.Sprintf("%s.outputOps[0]", param.Name)
 					mi.OpInputs = append(mi.OpInputs, param.Name)
@@ -226,8 +228,8 @@ type MethodInfo struct {
 	OpInputSlices          []string
 	NillableInputs         []string
 	Inputs                 []*ParameterInfo
-	Exported, Excluded     bool
-	Comments               []string
+	Exported, Excluded bool
+	Comments           []string
 	StopGradient           bool
 
 	HasMultipleOutputs bool
@@ -265,6 +267,14 @@ import (
 	"github.com/gomlx/gomlx/pkg/support/xslices"
 	"github.com/gomlx/gomlx/pkg/core/dtypes"
 )
+
+// strNillableNode formats a nillable *Node for display.
+func strNillableNode(n *Node) string {
+	if n == nil {
+		return "nil"
+	}
+	return fmt.Sprintf("[#%d]", n.Id())
+}
 
 type NodeType int
 

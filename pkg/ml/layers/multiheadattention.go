@@ -8,7 +8,6 @@ import (
 	"reflect"
 	"strings"
 
-	"github.com/gomlx/gomlx/backends"
 	. "github.com/gomlx/gomlx/internal/exceptions"
 	. "github.com/gomlx/gomlx/pkg/core/graph"
 	"github.com/gomlx/gomlx/pkg/core/shapes"
@@ -359,12 +358,10 @@ func (b *MultiHeadAttentionBuilder) DoneWithCoefficients() (attentionOutput, att
 }
 
 // canUseFusedSDPA checks whether the fused SDPA fast path can be used.
-// Requirements: backend support, no dropout, rank-3 inputs (single inner axis),
+// Requirements: no dropout, rank-3 inputs (single inner axis),
 // no complex masks, and keyQueryDim == valueDim.
+// Backend dtype support is handled automatically by FusedOpCaller.
 func (b *MultiHeadAttentionBuilder) canUseFusedSDPA() bool {
-	if !b.g.Backend().Capabilities().Operations[backends.OpTypeFusedMultiHeadSDPA] {
-		return false
-	}
 	if b.dropoutRate > 0 {
 		return false
 	}
@@ -400,8 +397,16 @@ func (b *MultiHeadAttentionBuilder) fusedDone() *Node {
 	// once on query (line 289) and once on logits (line 317).
 	scale := 1.0 / float64(b.keyQueryDim)
 
-	sdpaOutput := FusedMultiHeadSDPA(projectedQuery, projectedKey, projectedValue,
-		nil, b.numHeads, b.numHeads, scale, b.useCausalMask)
+	sdpaOutput := FusedOpCaller(
+		func() *Node {
+			return FusedMultiHeadSDPA(projectedQuery, projectedKey, projectedValue,
+				nil, b.numHeads, b.numHeads, scale, b.useCausalMask)
+		},
+		func() *Node {
+			return SDPADecomposed(projectedQuery, projectedKey, projectedValue,
+				nil, b.numHeads, b.numHeads, scale, b.useCausalMask)
+		},
+	)
 
 	// Transpose back: [batch, numHeads, seqLen, headDim] → [batch, seqLen, numHeads, headDim]
 	sdpaOutput = TransposeAllDims(sdpaOutput, 0, 2, 1, 3)

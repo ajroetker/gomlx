@@ -71,10 +71,10 @@ func QKVDenseOutputBuffers(backend *Backend, node *Node) (q, k, v *Buffer) {
 // Used by the highway subpackage for non-trailing axis combinations where SIMD
 // acceleration is not applicable.
 func LayerNormFloat32Fallback(input, output, gamma, beta *Buffer, axes []int, epsilon float64) {
-	layerNormFloat32(input, output, gamma, beta, axes, epsilon)
+	layerNorm[float32](input, output, gamma, beta, axes, epsilon)
 }
 
 // LayerNormFloat64Fallback is the scalar implementation of LayerNorm for float64.
 func LayerNormFloat64Fallback(input, output, gamma, beta *Buffer, axes []int, epsilon float64) {
-	layerNormFloat64(input, output, gamma, beta, axes, epsilon)
+	layerNorm[float64](input, output, gamma, beta, axes, epsilon)
 }

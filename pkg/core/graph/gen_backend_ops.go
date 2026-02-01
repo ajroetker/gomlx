@@ -13,6 +13,14 @@ import (
 	"github.com/gomlx/gomlx/pkg/support/xslices"
 )
 
+// strNillableNode formats a nillable *Node for display.
+func strNillableNode(n *Node) string {
+	if n == nil {
+		return "nil"
+	}
+	return fmt.Sprintf("[#%d]", n.Id())
+}
+
 type NodeType int
 
 const (
@@ -1815,26 +1823,13 @@ func (ni *nodeInputsFusedDense) String() string {
 		ni.Type(),
 		ni.x.Id(),
 		ni.weight.Id(),
-		func() string {
-			if ni.bias != nil {
-				return fmt.Sprintf("[#%d]", ni.bias.Id())
-			}
-			return "nil"
-		}(),
+		strNillableNode(ni.bias),
 		ni.activation,
 	)
 }
 
-// FusedDense performs fused matmul + optional bias + optional activation:
-//
-//	y = activation(x @ W + bias)
-//
-// x: [batch..., in_features], weight: [in_features, out_features...],
-// bias: [out_features...] (nil-able).
-// Contracts x's last axis with weight's first axis.
-// activation specifies the activation function to apply after the matmul+bias.
-// Use ActivationNone for no activation.
-func FusedDense(x *Node, weight *Node, bias *Node, activation backends.ActivationType) (
+// backendFusedDense is a Graph wrapper for the backend.Builder.FusedDense method.
+func backendFusedDense(x *Node, weight *Node, bias *Node, activation backends.ActivationType) (
 	node *Node) {
 	inputNodes := []*Node{x, weight}
 	if bias != nil {
@@ -1886,10 +1881,8 @@ func (ni *nodeInputsFusedGelu) String() string {
 	)
 }
 
-// FusedGelu computes Gaussian Error Linear Unit activation.
-// If exact is true, the exact GELU (using erf) is computed;
-// otherwise the tanh approximation is used.
-func FusedGelu(x *Node, exact bool) (
+// backendFusedGelu is a Graph wrapper for the backend.Builder.FusedGelu method.
+func backendFusedGelu(x *Node, exact bool) (
 	node *Node) {
 	inputNodes := []*Node{x}
 	g := validateBuildingGraphFromInputs(inputNodes...)
@@ -1933,25 +1926,13 @@ func (ni *nodeInputsFusedLayerNorm) String() string {
 		ni.x.Id(),
 		ni.axes,
 		ni.epsilon,
-		func() string {
-			if ni.gamma != nil {
-				return fmt.Sprintf("[#%d]", ni.gamma.Id())
-			}
-			return "nil"
-		}(),
-		func() string {
-			if ni.beta != nil {
-				return fmt.Sprintf("[#%d]", ni.beta.Id())
-			}
-			return "nil"
-		}(),
+		strNillableNode(ni.gamma),
+		strNillableNode(ni.beta),
 	)
 }
 
-// FusedLayerNorm applies layer normalization over specified axes.
-// gamma and beta can be nil if no learned scale/offset.
-// epsilon: numerical stability constant (typically 1e-5).
-func FusedLayerNorm(x *Node, axes []int, epsilon float64, gamma *Node, beta *Node) (
+// backendFusedLayerNorm is a Graph wrapper for the backend.Builder.FusedLayerNorm method.
+func backendFusedLayerNorm(x *Node, axes []int, epsilon float64, gamma *Node, beta *Node) (
 	node *Node) {
 	inputNodes := []*Node{x}
 	if gamma != nil {
@@ -2015,12 +1996,7 @@ func (ni *nodeInputsFusedMultiHeadSDPA) String() string {
 		ni.q.Id(),
 		ni.k.Id(),
 		ni.v.Id(),
-		func() string {
-			if ni.mask != nil {
-				return fmt.Sprintf("[#%d]", ni.mask.Id())
-			}
-			return "nil"
-		}(),
+		strNillableNode(ni.mask),
 		ni.numHeads,
 		ni.numKVHeads,
 		ni.scale,
@@ -2028,24 +2004,8 @@ func (ni *nodeInputsFusedMultiHeadSDPA) String() string {
 	)
 }
 
-// FusedMultiHeadSDPA computes multi-head scaled dot-product attention.
-//
-// output = softmax(Q @ K^T * scale + mask) @ V, computed per-head with GQA support.
-//
-// Inputs:
-//   - q: [batch, numHeads, seqLen, headDim]
-//   - k: [batch, numKVHeads, kvLen, headDim]
-//   - v: [batch, numKVHeads, kvLen, headDim]
-//   - mask: [seqLen, kvLen] (optional, additive mask; nil for no mask)
-//
-// Parameters:
-//   - numHeads: number of query attention heads
-//   - numKVHeads: number of key/value attention heads (for GQA; numHeads must be divisible by numKVHeads)
-//   - scale: scaling factor applied to Q @ K^T (typically 1/sqrt(headDim))
-//   - causal: if true, apply causal (lower-triangular) mask
-//
-// Output: [batch, numHeads, seqLen, headDim]
-func FusedMultiHeadSDPA(q *Node, k *Node, v *Node, mask *Node, numHeads int, numKVHeads int, scale float64, causal bool) (
+// backendFusedMultiHeadSDPA is a Graph wrapper for the backend.Builder.FusedMultiHeadSDPA method.
+func backendFusedMultiHeadSDPA(q *Node, k *Node, v *Node, mask *Node, numHeads int, numKVHeads int, scale float64, causal bool) (
 	node *Node) {
 	inputNodes := []*Node{q, k, v}
 	if mask != nil {
@@ -2103,45 +2063,16 @@ func (ni *nodeInputsFusedQKVDense) String() string {
 		ni.Type(),
 		ni.x.Id(),
 		ni.wQKV.Id(),
-		func() string {
-			if ni.biasQ != nil {
-				return fmt.Sprintf("[#%d]", ni.biasQ.Id())
-			}
-			return "nil"
-		}(),
-		func() string {
-			if ni.biasK != nil {
-				return fmt.Sprintf("[#%d]", ni.biasK.Id())
-			}
-			return "nil"
-		}(),
-		func() string {
-			if ni.biasV != nil {
-				return fmt.Sprintf("[#%d]", ni.biasV.Id())
-			}
-			return "nil"
-		}(),
+		strNillableNode(ni.biasQ),
+		strNillableNode(ni.biasK),
+		strNillableNode(ni.biasV),
 		ni.qDim,
 		ni.kvDim,
 	)
 }
 
-// FusedQKVDense performs fused QKV projection: a single large matmul followed by
-// scatter into separate Q, K, V outputs with optional per-projection bias.
-//
-// Inputs:
-//   - x: [batch, inFeatures]
-//   - wQKV: [inFeatures, qDim+2*kvDim] (Q/K/V weights concatenated along last axis)
-//   - biasQ: [qDim] (optional, nil for no bias)
-//   - biasK: [kvDim] (optional, nil for no bias)
-//   - biasV: [kvDim] (optional, nil for no bias)
-//
-// Parameters:
-//   - qDim: output dimension for Q projection
-//   - kvDim: output dimension for K and V projections
-//
-// Outputs: q [batch, qDim], k [batch, kvDim], v [batch, kvDim]
-func FusedQKVDense(x *Node, wQKV *Node, biasQ *Node, biasK *Node, biasV *Node, qDim int, kvDim int) (
+// backendFusedQKVDense is a Graph wrapper for the backend.Builder.FusedQKVDense method.
+func backendFusedQKVDense(x *Node, wQKV *Node, biasQ *Node, biasK *Node, biasV *Node, qDim int, kvDim int) (
 	q, k, v *Node) {
 	inputNodes := []*Node{x, wQKV}
 	if biasQ != nil {
@@ -2212,12 +2143,8 @@ func (ni *nodeInputsFusedSoftmax) String() string {
 	)
 }
 
-// FusedSoftmax computes softmax along the specified axis.
-//
-// Note: unlike the generic softmax in GoMLX's graph package, the fused
-// softmax only accepts one axis. The axis must be non-negative (the caller
-// normalizes negative indices before calling).
-func FusedSoftmax(x *Node, axis int) (
+// backendFusedSoftmax is a Graph wrapper for the backend.Builder.FusedSoftmax method.
+func backendFusedSoftmax(x *Node, axis int) (
 	node *Node) {
 	inputNodes := []*Node{x}
 	g := validateBuildingGraphFromInputs(inputNodes...)
