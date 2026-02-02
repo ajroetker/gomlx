@@ -94,7 +94,7 @@ func TestMultiHeadAttentionFusedPath(t *testing.T) {
 
 			// Decomposed path.
 			decomposedExec := context.MustNewExec(backend, ctx, func(ctx *context.Context, g *Graph) []*Node {
-				input := IotaFull(g, shapes.Make(F32, batchSize, seqLen, inputDim))
+				input := IotaFull(g, shapes.Make(dtypes.Float32, batchSize, seqLen, inputDim))
 				builder := MultiHeadAttention(ctx, input, input, input, numHeads, headDim)
 				if useCausal {
 					builder = builder.UseCausalMask()
@@ -106,7 +106,7 @@ func TestMultiHeadAttentionFusedPath(t *testing.T) {
 
 			// Fused path (Done() will use fused when available).
 			fusedExec := context.MustNewExec(backend, ctx.Reuse(), func(ctx *context.Context, g *Graph) []*Node {
-				input := IotaFull(g, shapes.Make(F32, batchSize, seqLen, inputDim))
+				input := IotaFull(g, shapes.Make(dtypes.Float32, batchSize, seqLen, inputDim))
 				builder := MultiHeadAttention(ctx, input, input, input, numHeads, headDim)
 				if useCausal {
 					builder = builder.UseCausalMask()
