@@ -6,8 +6,8 @@ import (
 	"errors"
 
 	"github.com/gomlx/gomlx/backends"
-	"github.com/gomlx/gomlx/internal/exceptions"
 	"github.com/gomlx/gomlx/pkg/core/shapes"
+	"github.com/gomlx/gomlx/pkg/support/exceptions"
 )
 
 // BackendFusedSoftmax computes softmax along the specified axis.

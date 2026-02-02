@@ -5,7 +5,7 @@ package attention
 import (
 	"math"
 
-	. "github.com/gomlx/gomlx/internal/exceptions"
+	. "github.com/gomlx/gomlx/pkg/support/exceptions"
 	. "github.com/gomlx/gomlx/pkg/core/graph"
 )
 
