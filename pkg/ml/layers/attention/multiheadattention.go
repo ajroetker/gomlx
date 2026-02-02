@@ -506,9 +506,9 @@ func (b *MultiHeadAttentionBuilder) canUseFusedSDPA() bool {
 // transposes back and applies the output Dense projection.
 func (b *MultiHeadAttentionBuilder) fusedDone() *Node {
 	// Project Q, K, V with the same Dense layer names as DoneWithCoefficients.
-	projectedQuery := Dense(b.ctx.In("query"), b.query, true, b.numHeads, b.keyQueryDim)
-	projectedKey := Dense(b.ctx.In("key"), b.key, true, b.numHeads, b.keyQueryDim)
-	projectedValue := Dense(b.ctx.In("value"), b.value, true, b.numHeads, b.valueDim)
+	projectedQuery := layers.Dense(b.ctx.In("query"), b.query, true, b.numHeads, b.keyQueryDim)
+	projectedKey := layers.Dense(b.ctx.In("key"), b.key, true, b.numHeads, b.keyQueryDim)
+	projectedValue := layers.Dense(b.ctx.In("value"), b.value, true, b.numHeads, b.valueDim)
 
 	// Projected shapes are [batch, seqLen, numHeads, headDim].
 	// Transpose to [batch, numHeads, seqLen, headDim] for SDPA.
@@ -520,7 +520,7 @@ func (b *MultiHeadAttentionBuilder) fusedDone() *Node {
 	// once on query (line 289) and once on logits (line 317).
 	scale := 1.0 / float64(b.keyQueryDim)
 
-	sdpaOutput := FusedOpCaller(
+	sdpaOutput := InternalFusedOpCaller(
 		func() *Node {
 			return FusedMultiHeadSDPA(projectedQuery, projectedKey, projectedValue,
 				nil, b.numHeads, b.numHeads, scale, b.useCausalMask)
@@ -539,7 +539,7 @@ func (b *MultiHeadAttentionBuilder) fusedDone() *Node {
 	sdpaOutput = Reshape(sdpaOutput, dims[0], dims[1], dims[2]*dims[3])
 
 	// Final output projection: [batch, seqLen, outputDim]
-	return Dense(b.ctx.In("output"), sdpaOutput, b.useProjectionBias, b.outputDim)
+	return layers.Dense(b.ctx.In("output"), sdpaOutput, b.useProjectionBias, b.outputDim)
 }
 
 // Done or DoneWithCoefficients should be called after all optional settings are configured.
