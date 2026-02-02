@@ -9,6 +9,7 @@ import (
 	"github.com/gomlx/gomlx/backends"
 	"github.com/gomlx/gomlx/backends/simplego"
 	"github.com/gomlx/gomlx/pkg/core/dtypes"
+	"github.com/gomlx/gomlx/pkg/core/shapes"
 	"github.com/pkg/errors"
 )
 
@@ -32,6 +33,21 @@ func computeAxisStrides(dims []int, axis int) (outerSize, axisSize, innerSize in
 	innerSize = 1
 	for i := axis + 1; i < len(dims); i++ {
 		innerSize *= dims[i]
+	}
+	return
+}
+
+// rowColDecomposition returns (rows, cols) from a shape by treating the last
+// dimension as cols and collapsing all leading dimensions into rows. This
+// provides a natural decomposition for parallelizing element-wise operations.
+func rowColDecomposition(s shapes.Shape) (rows, cols int) {
+	if s.Rank() == 0 {
+		return 1, 1
+	}
+	cols = s.Dimensions[s.Rank()-1]
+	rows = s.Size() / cols
+	if rows == 0 {
+		rows = 1
 	}
 	return
 }
@@ -66,10 +82,7 @@ func softmaxHighway[T interface{ ~float32 | ~float64 }](input, output []T, axis 
 
 	if innerSize == 1 {
 		// Fast path: softmax along last axis. Each contiguous chunk is one softmax group.
-		for outer := 0; outer < outerSize; outer++ {
-			off := outer * axisSize
-			nn.Softmax(input[off:off+axisSize], output[off:off+axisSize])
-		}
+		nn.ParallelSoftmax(hwyPool, input, output, outerSize, axisSize)
 		return
 	}
 
@@ -87,10 +100,7 @@ func softmaxHighway[T interface{ ~float32 | ~float64 }](input, output []T, axis 
 		matmul.Transpose2D(inBlock, axisSize, innerSize, tmp)
 
 		// Softmax over each contiguous row of axisSize elements
-		for inner := 0; inner < innerSize; inner++ {
-			rowOff := inner * axisSize
-			nn.Softmax(tmp[rowOff:rowOff+axisSize], tmp[rowOff:rowOff+axisSize])
-		}
+		nn.ParallelSoftmax(hwyPool, tmp, tmp, innerSize, axisSize)
 
 		// Transpose back (innerSize × axisSize) → (axisSize × innerSize)
 		matmul.Transpose2D(tmp, innerSize, axisSize, outBlock)
@@ -98,14 +108,16 @@ func softmaxHighway[T interface{ ~float32 | ~float64 }](input, output []T, axis 
 }
 
 // execGeluHighway implements SIMD-accelerated GELU: x * 0.5 * (1 + erf(x / sqrt(2))).
+// Uses row-parallel execution for large tensors.
 func execGeluHighway(backend *simplego.Backend, node *simplego.Node, inputs []*simplego.Buffer, inputsOwned []bool) (*simplego.Buffer, error) {
 	input, output := simplego.UnaryOperandAndOutput(backend, inputs, inputsOwned)
+	rows, cols := rowColDecomposition(input.Shape())
 
 	switch input.DType() {
 	case dtypes.Float32:
-		activation.GELU(input.Flat().([]float32), output.Flat().([]float32))
+		activation.ParallelGELU(hwyPool, input.Flat().([]float32), output.Flat().([]float32), rows, cols)
 	case dtypes.Float64:
-		activation.GELU(input.Flat().([]float64), output.Flat().([]float64))
+		activation.ParallelGELU(hwyPool, input.Flat().([]float64), output.Flat().([]float64), rows, cols)
 	default:
 		return nil, errors.Errorf("highway Gelu: unsupported dtype %s", input.DType())
 	}
@@ -170,7 +182,7 @@ func execLayerNormHighway(backend *simplego.Backend, node *simplego.Node, inputs
 		if beta != nil {
 			betaData = beta.Flat().([]float32)
 		}
-		nn.LayerNorm(input.Flat().([]float32), output.Flat().([]float32), normSize, gammaData, betaData, float32(epsilon))
+		nn.ParallelLayerNorm(hwyPool, input.Flat().([]float32), output.Flat().([]float32), normSize, gammaData, betaData, float32(epsilon))
 	case dtypes.Float64:
 		var gammaData, betaData []float64
 		if gamma != nil {
@@ -179,7 +191,7 @@ func execLayerNormHighway(backend *simplego.Backend, node *simplego.Node, inputs
 		if beta != nil {
 			betaData = beta.Flat().([]float64)
 		}
-		nn.LayerNorm(input.Flat().([]float64), output.Flat().([]float64), normSize, gammaData, betaData, epsilon)
+		nn.ParallelLayerNorm(hwyPool, input.Flat().([]float64), output.Flat().([]float64), normSize, gammaData, betaData, epsilon)
 	default:
 		return nil, errors.Errorf("highway LayerNorm: unsupported dtype %s", input.DType())
 	}
