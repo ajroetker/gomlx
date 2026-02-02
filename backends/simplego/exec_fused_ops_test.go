@@ -160,16 +160,16 @@ func TestFusedLayerNorm_Simple(t *testing.T) {
 	got := result.flat.([]float32)
 
 	// Verify each row is normalized: mean ≈ 0, variance ≈ 1.
-	for row := 0; row < 2; row++ {
+	for row := range 2 {
 		var sum float32
-		for i := 0; i < 4; i++ {
+		for i := range 4 {
 			sum += got[row*4+i]
 		}
 		mean := sum / 4.0
 		assert.InDelta(t, 0.0, mean, 1e-5, "row %d mean", row)
 
 		var varSum float32
-		for i := 0; i < 4; i++ {
+		for i := range 4 {
 			diff := got[row*4+i] - mean
 			varSum += diff * diff
 		}
@@ -401,7 +401,7 @@ func TestFusedSoftmax_3D(t *testing.T) {
 
 	got := result.flat.([]float32)
 	// Each group of 3 should sum to 1.
-	for group := 0; group < 4; group++ {
+	for group := range 4 {
 		base := group * 3
 		sum := got[base] + got[base+1] + got[base+2]
 		assert.InDelta(t, 1.0, sum, fusedTestTol, "group %d", group)
@@ -410,7 +410,7 @@ func TestFusedSoftmax_3D(t *testing.T) {
 
 // execFusedOpMultiOutput builds, compiles and executes a multi-output fused op graph.
 // buildFn receives the Function and the parameter Values, and returns 3 output Values.
-func execFusedOpMultiOutput3(t *testing.T, inputShapes []shapes.Shape, inputDatas []interface{},
+func execFusedOpMultiOutput3(t *testing.T, inputShapes []shapes.Shape, inputDatas []any,
 	buildFn func(f backends.Function, params []backends.Value) (backends.Value, backends.Value, backends.Value, error),
 ) [3]*Buffer {
 	t.Helper()
@@ -446,41 +446,6 @@ func execFusedOpMultiOutput3(t *testing.T, inputShapes []shapes.Shape, inputData
 	return [3]*Buffer{outputs[0].(*Buffer), outputs[1].(*Buffer), outputs[2].(*Buffer)}
 }
 
-// execFusedOpMultiInput builds, compiles and executes a single-output fused op graph with multiple inputs.
-func execFusedOpMultiInput(t *testing.T, inputShapes []shapes.Shape, inputDatas []interface{},
-	buildFn func(f backends.Function, params []backends.Value) (backends.Value, error),
-) *Buffer {
-	t.Helper()
-	builder := backend.Builder("fused_test_multi_input")
-	mainFn := builder.Main()
-
-	params := make([]backends.Value, len(inputShapes))
-	for i, s := range inputShapes {
-		p, err := mainFn.Parameter("x"+string(rune('0'+i)), s, nil)
-		require.NoError(t, err)
-		params[i] = p
-	}
-
-	out, err := buildFn(mainFn, params)
-	require.NoError(t, err)
-
-	require.NoError(t, mainFn.Return([]backends.Value{out}, nil))
-	exec, err := builder.Compile()
-	require.NoError(t, err)
-
-	inputBufs := make([]backends.Buffer, len(inputDatas))
-	for i, data := range inputDatas {
-		buf, err := backend.BufferFromFlatData(0, data, inputShapes[i])
-		require.NoError(t, err)
-		inputBufs[i] = buf
-	}
-
-	outputs, err := exec.Execute(inputBufs, nil, 0)
-	require.NoError(t, err)
-	require.Len(t, outputs, 1)
-	return outputs[0].(*Buffer)
-}
-
 // ---- FusedMultiHeadSDPA tests ----
 
 func TestFusedMultiHeadSDPA_SingleHead(t *testing.T) {
@@ -498,9 +463,9 @@ func TestFusedMultiHeadSDPA_SingleHead(t *testing.T) {
 
 	scale := float64(1.0 / math.Sqrt(2.0)) // 1/sqrt(headDim)
 
-	result := execFusedOpMultiInput(t,
+	result := testBackendMultiInput(t,
 		[]shapes.Shape{qShape, kShape, vShape},
-		[]interface{}{q, k, v},
+		[]any{q, k, v},
 		func(f backends.Function, params []backends.Value) (backends.Value, error) {
 			return f.FusedMultiHeadSDPA(params[0], params[1], params[2], nil, 1, 1, scale, false)
 		},
@@ -533,9 +498,9 @@ func TestFusedMultiHeadSDPA_Causal(t *testing.T) {
 	kShape := shapes.Make(dtypes.Float32, 1, 1, 2, 1)
 	vShape := shapes.Make(dtypes.Float32, 1, 1, 2, 1)
 
-	result := execFusedOpMultiInput(t,
+	result := testBackendMultiInput(t,
 		[]shapes.Shape{qShape, kShape, vShape},
-		[]interface{}{q, k, v},
+		[]any{q, k, v},
 		func(f backends.Function, params []backends.Value) (backends.Value, error) {
 			return f.FusedMultiHeadSDPA(params[0], params[1], params[2], nil, 1, 1, 1.0, true)
 		},
@@ -551,17 +516,17 @@ func TestFusedMultiHeadSDPA_Causal(t *testing.T) {
 func TestFusedMultiHeadSDPA_MultiHead(t *testing.T) {
 	// batch=1, numHeads=2, seqLen=1, headDim=1, kvLen=1
 	// Simple case: each head attends to a single key/value.
-	q := []float32{1, 2}           // 2 heads, each with seqLen=1, headDim=1
-	k := []float32{1, 1}           // 2 heads
-	v := []float32{100, 200}       // 2 heads
+	q := []float32{1, 2}     // 2 heads, each with seqLen=1, headDim=1
+	k := []float32{1, 1}     // 2 heads
+	v := []float32{100, 200} // 2 heads
 
 	qShape := shapes.Make(dtypes.Float32, 1, 2, 1, 1)
 	kShape := shapes.Make(dtypes.Float32, 1, 2, 1, 1)
 	vShape := shapes.Make(dtypes.Float32, 1, 2, 1, 1)
 
-	result := execFusedOpMultiInput(t,
+	result := testBackendMultiInput(t,
 		[]shapes.Shape{qShape, kShape, vShape},
-		[]interface{}{q, k, v},
+		[]any{q, k, v},
 		func(f backends.Function, params []backends.Value) (backends.Value, error) {
 			return f.FusedMultiHeadSDPA(params[0], params[1], params[2], nil, 2, 2, 1.0, false)
 		},
@@ -576,17 +541,17 @@ func TestFusedMultiHeadSDPA_MultiHead(t *testing.T) {
 func TestFusedMultiHeadSDPA_GQA(t *testing.T) {
 	// batch=1, numHeads=2, numKVHeads=1 (GQA: 2 query heads share 1 KV head)
 	// seqLen=1, kvLen=1, headDim=1
-	q := []float32{1, 2}     // 2 heads
-	k := []float32{1}        // 1 KV head
-	v := []float32{42}       // 1 KV head
+	q := []float32{1, 2} // 2 heads
+	k := []float32{1}    // 1 KV head
+	v := []float32{42}   // 1 KV head
 
 	qShape := shapes.Make(dtypes.Float32, 1, 2, 1, 1)
 	kShape := shapes.Make(dtypes.Float32, 1, 1, 1, 1)
 	vShape := shapes.Make(dtypes.Float32, 1, 1, 1, 1)
 
-	result := execFusedOpMultiInput(t,
+	result := testBackendMultiInput(t,
 		[]shapes.Shape{qShape, kShape, vShape},
-		[]interface{}{q, k, v},
+		[]any{q, k, v},
 		func(f backends.Function, params []backends.Value) (backends.Value, error) {
 			return f.FusedMultiHeadSDPA(params[0], params[1], params[2], nil, 2, 1, 1.0, false)
 		},
@@ -611,9 +576,9 @@ func TestFusedMultiHeadSDPA_WithMask(t *testing.T) {
 	vShape := shapes.Make(dtypes.Float32, 1, 1, 2, 1)
 	maskShape := shapes.Make(dtypes.Float32, 1, 2)
 
-	result := execFusedOpMultiInput(t,
+	result := testBackendMultiInput(t,
 		[]shapes.Shape{qShape, kShape, vShape, maskShape},
-		[]interface{}{q, k, v, mask},
+		[]any{q, k, v, mask},
 		func(f backends.Function, params []backends.Value) (backends.Value, error) {
 			return f.FusedMultiHeadSDPA(params[0], params[1], params[2], params[3], 1, 1, 1.0, false)
 		},
@@ -652,7 +617,7 @@ func TestFusedQKVDense_Identity(t *testing.T) {
 
 	results := execFusedOpMultiOutput3(t,
 		[]shapes.Shape{xShape, wShape, bqShape, bkShape, bvShape},
-		[]interface{}{x, wQKV, biasQ, biasK, biasV},
+		[]any{x, wQKV, biasQ, biasK, biasV},
 		func(f backends.Function, params []backends.Value) (backends.Value, backends.Value, backends.Value, error) {
 			return f.FusedQKVDense(params[0], params[1], params[2], params[3], params[4], 2, 1)
 		},
@@ -689,7 +654,7 @@ func TestFusedQKVDense_NoBias(t *testing.T) {
 
 	results := execFusedOpMultiOutput3(t,
 		[]shapes.Shape{xShape, wShape},
-		[]interface{}{x, wQKV},
+		[]any{x, wQKV},
 		func(f backends.Function, params []backends.Value) (backends.Value, backends.Value, backends.Value, error) {
 			return f.FusedQKVDense(params[0], params[1], nil, nil, nil, 2, 1)
 		},
@@ -734,7 +699,7 @@ func TestFusedQKVDense_EqualDims(t *testing.T) {
 
 	results := execFusedOpMultiOutput3(t,
 		[]shapes.Shape{xShape, wShape},
-		[]interface{}{x, wQKV},
+		[]any{x, wQKV},
 		func(f backends.Function, params []backends.Value) (backends.Value, backends.Value, backends.Value, error) {
 			return f.FusedQKVDense(params[0], params[1], nil, nil, nil, 2, 2)
 		},

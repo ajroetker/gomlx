@@ -516,8 +516,8 @@ func (b *MultiHeadAttentionBuilder) fusedDone() *Node {
 	projectedKey = TransposeAllDims(projectedKey, 0, 2, 1, 3)
 	projectedValue = TransposeAllDims(projectedValue, 0, 2, 1, 3)
 
-	// Scale matches the decomposed path which applies 1/sqrt(d) twice:
-	// once on query (line 289) and once on logits (line 317).
+	// The decomposed path (DoneWithCoefficients) divides logits by sqrt(d).
+	// The fused SDPA multiplies scores by this scale, so use 1/d to match.
 	scale := 1.0 / float64(b.keyQueryDim)
 
 	sdpaOutput := InternalFusedOpCaller(

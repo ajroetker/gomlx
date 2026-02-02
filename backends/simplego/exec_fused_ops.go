@@ -27,7 +27,7 @@ func init() {
 func computeAxisStrides(shape shapes.Shape, axis int) (outerSize, axisSize, innerSize int) {
 	dims := shape.Dimensions
 	outerSize = 1
-	for i := 0; i < axis; i++ {
+	for i := range axis {
 		outerSize *= dims[i]
 	}
 	axisSize = dims[axis]
@@ -59,13 +59,13 @@ func execFusedSoftmax(backend *Backend, node *Node, inputs []*Buffer, inputsOwne
 
 func softmax[T float32 | float64](input, output []T, axis int, shape shapes.Shape) {
 	outerSize, axisSize, innerSize := computeAxisStrides(shape, axis)
-	for outer := 0; outer < outerSize; outer++ {
-		for inner := 0; inner < innerSize; inner++ {
+	for outer := range outerSize {
+		for inner := range innerSize {
 			baseIdx := outer*axisSize*innerSize + inner
 
 			// Pass 1: Find max.
 			maxVal := T(math.Inf(-1))
-			for i := 0; i < axisSize; i++ {
+			for i := range axisSize {
 				idx := baseIdx + i*innerSize
 				if input[idx] > maxVal {
 					maxVal = input[idx]
@@ -74,7 +74,7 @@ func softmax[T float32 | float64](input, output []T, axis int, shape shapes.Shap
 
 			// Pass 2: Exp and sum.
 			var sum T
-			for i := 0; i < axisSize; i++ {
+			for i := range axisSize {
 				idx := baseIdx + i*innerSize
 				output[idx] = T(math.Exp(float64(input[idx] - maxVal)))
 				sum += output[idx]
@@ -82,7 +82,7 @@ func softmax[T float32 | float64](input, output []T, axis int, shape shapes.Shap
 
 			// Pass 3: Normalize.
 			invSum := 1.0 / sum
-			for i := 0; i < axisSize; i++ {
+			for i := range axisSize {
 				idx := baseIdx + i*innerSize
 				output[idx] *= invSum
 			}
@@ -203,7 +203,7 @@ func trailingAxesLayerNorm[T float32 | float64](inData, outData, gammaData, beta
 	normSizeF := T(normSize)
 	outerSize := len(inData) / normSize
 
-	for outer := 0; outer < outerSize; outer++ {
+	for outer := range outerSize {
 		base := outer * normSize
 
 		// Compute mean.
@@ -250,7 +250,7 @@ func arbitraryAxesLayerNorm[T float32 | float64](inData, outData, gammaData, bet
 
 	// Build outer axes (those not in normalization set).
 	outerAxes := make([]int, 0, rank-len(axes))
-	for i := 0; i < rank; i++ {
+	for i := range rank {
 		if !isNormAxis[i] {
 			outerAxes = append(outerAxes, i)
 		}
@@ -302,7 +302,7 @@ func arbitraryAxesLayerNorm[T float32 | float64](inData, outData, gammaData, bet
 // execFusedDense implements y = activation(matmul + bias).
 // inputs layout: [dotResult, x, weight, bias?]
 // inputs[0] is the DotGeneral result (matmul already computed by the backend).
-// inputs[1] is x, inputs[2] is weight (unused by this executor; used by highway).
+// inputs[1] is x, inputs[2] is weight (unused by this executor).
 // inputs[3] is the optional bias.
 func execFusedDense(backend *Backend, node *Node, inputs []*Buffer, inputsOwned []bool) (*Buffer, error) {
 	matmul := inputs[0]
@@ -441,7 +441,7 @@ func execFusedMultiHeadSDPA(backend *Backend, node *Node, inputs []*Buffer, inpu
 		if mask != nil {
 			maskData = mask.flat.([]float32)
 		}
-		multiHeadSDPAFloat32(
+		multiHeadSDPA(
 			q.flat.([]float32), k.flat.([]float32), v.flat.([]float32), maskData, output.flat.([]float32),
 			q.shape.Dimensions[0], data.numHeads, data.numKVHeads,
 			q.shape.Dimensions[2], k.shape.Dimensions[2], q.shape.Dimensions[3],
@@ -453,7 +453,7 @@ func execFusedMultiHeadSDPA(backend *Backend, node *Node, inputs []*Buffer, inpu
 		if mask != nil {
 			maskData = mask.flat.([]float64)
 		}
-		multiHeadSDPAFloat64(
+		multiHeadSDPA(
 			q.flat.([]float64), k.flat.([]float64), v.flat.([]float64), maskData, output.flat.([]float64),
 			q.shape.Dimensions[0], data.numHeads, data.numKVHeads,
 			q.shape.Dimensions[2], k.shape.Dimensions[2], q.shape.Dimensions[3],
@@ -466,18 +466,17 @@ func execFusedMultiHeadSDPA(backend *Backend, node *Node, inputs []*Buffer, inpu
 	return output, nil
 }
 
-func sdpaFloat32(q, k, v, mask, scores, output []float32, seqLen, kvLen, headDim int, scale float32, causal bool) {
-	// Step 1: scores[i][j] = sum_d(q[i][d] * k[j][d]) * scale + mask[i][j]
-	for i := 0; i < seqLen; i++ {
-		// Compute row max for numerical stability.
-		rowMax := float32(math.Inf(-1))
-		for j := 0; j < kvLen; j++ {
+func sdpa[T float32 | float64](q, k, v, mask, scores, output []T, seqLen, kvLen, headDim int, scale T, causal bool) {
+	// scores[i][j] = sum_d(q[i][d] * k[j][d]) * scale + mask[i][j]
+	for i := range seqLen {
+		rowMax := T(math.Inf(-1))
+		for j := range kvLen {
 			if causal && j > i {
-				scores[i*kvLen+j] = float32(math.Inf(-1))
+				scores[i*kvLen+j] = T(math.Inf(-1))
 				continue
 			}
-			var dot float32
-			for d := 0; d < headDim; d++ {
+			var dot T
+			for d := range headDim {
 				dot += q[i*headDim+d] * k[j*headDim+d]
 			}
 			s := dot * scale
@@ -491,93 +490,20 @@ func sdpaFloat32(q, k, v, mask, scores, output []float32, seqLen, kvLen, headDim
 		}
 
 		// Softmax: exp(scores - max) and sum.
-		var sum float32
-		for j := 0; j < kvLen; j++ {
-			scores[i*kvLen+j] = float32(math.Exp(float64(scores[i*kvLen+j] - rowMax)))
-			sum += scores[i*kvLen+j]
-		}
-		invSum := float32(1.0) / sum
-		for j := 0; j < kvLen; j++ {
-			scores[i*kvLen+j] *= invSum
-		}
-
-		// Step 2: output[i][d] = sum_j(scores[i][j] * v[j][d])
-		for d := 0; d < headDim; d++ {
-			var acc float32
-			for j := 0; j < kvLen; j++ {
-				acc += scores[i*kvLen+j] * v[j*headDim+d]
-			}
-			output[i*headDim+d] = acc
-		}
-	}
-}
-
-func multiHeadSDPAFloat32(q, k, v, mask, output []float32,
-	batchSize, numHeads, numKVHeads, seqLen, kvLen, headDim int,
-	maskBatchStride, maskHeadStride int,
-	scale float32, causal bool,
-) {
-	headsPerKV := numHeads / numKVHeads
-	scores := make([]float32, seqLen*kvLen)
-	headSize := seqLen * headDim
-	kvHeadSize := kvLen * headDim
-	maskSliceLen := seqLen * kvLen
-	for b := 0; b < batchSize; b++ {
-		for h := 0; h < numHeads; h++ {
-			kvH := h / headsPerKV
-			qOff := (b*numHeads + h) * headSize
-			kOff := (b*numKVHeads + kvH) * kvHeadSize
-			vOff := kOff
-			oOff := qOff
-			var maskSlice []float32
-			if mask != nil {
-				maskOff := b*maskBatchStride + h*maskHeadStride
-				maskSlice = mask[maskOff : maskOff+maskSliceLen]
-			}
-			sdpaFloat32(
-				q[qOff:qOff+headSize], k[kOff:kOff+kvHeadSize], v[vOff:vOff+kvHeadSize],
-				maskSlice, scores, output[oOff:oOff+headSize],
-				seqLen, kvLen, headDim, scale, causal,
-			)
-		}
-	}
-}
-
-func sdpaFloat64(q, k, v, mask, scores, output []float64, seqLen, kvLen, headDim int, scale float64, causal bool) {
-	for i := 0; i < seqLen; i++ {
-		rowMax := math.Inf(-1)
-		for j := 0; j < kvLen; j++ {
-			if causal && j > i {
-				scores[i*kvLen+j] = math.Inf(-1)
-				continue
-			}
-			var dot float64
-			for d := 0; d < headDim; d++ {
-				dot += q[i*headDim+d] * k[j*headDim+d]
-			}
-			s := dot * scale
-			if mask != nil {
-				s += mask[i*kvLen+j]
-			}
-			scores[i*kvLen+j] = s
-			if s > rowMax {
-				rowMax = s
-			}
-		}
-
-		var sum float64
-		for j := 0; j < kvLen; j++ {
-			scores[i*kvLen+j] = math.Exp(scores[i*kvLen+j] - rowMax)
+		var sum T
+		for j := range kvLen {
+			scores[i*kvLen+j] = T(math.Exp(float64(scores[i*kvLen+j] - rowMax)))
 			sum += scores[i*kvLen+j]
 		}
 		invSum := 1.0 / sum
-		for j := 0; j < kvLen; j++ {
+		for j := range kvLen {
 			scores[i*kvLen+j] *= invSum
 		}
 
-		for d := 0; d < headDim; d++ {
-			var acc float64
-			for j := 0; j < kvLen; j++ {
+		// output[i][d] = sum_j(scores[i][j] * v[j][d])
+		for d := range headDim {
+			var acc T
+			for j := range kvLen {
 				acc += scores[i*kvLen+j] * v[j*headDim+d]
 			}
 			output[i*headDim+d] = acc
@@ -585,29 +511,29 @@ func sdpaFloat64(q, k, v, mask, scores, output []float64, seqLen, kvLen, headDim
 	}
 }
 
-func multiHeadSDPAFloat64(q, k, v, mask, output []float64,
+func multiHeadSDPA[T float32 | float64](q, k, v, mask, output []T,
 	batchSize, numHeads, numKVHeads, seqLen, kvLen, headDim int,
 	maskBatchStride, maskHeadStride int,
-	scale float64, causal bool,
+	scale T, causal bool,
 ) {
 	headsPerKV := numHeads / numKVHeads
-	scores := make([]float64, seqLen*kvLen)
+	scores := make([]T, seqLen*kvLen)
 	headSize := seqLen * headDim
 	kvHeadSize := kvLen * headDim
 	maskSliceLen := seqLen * kvLen
-	for b := 0; b < batchSize; b++ {
-		for h := 0; h < numHeads; h++ {
+	for b := range batchSize {
+		for h := range numHeads {
 			kvH := h / headsPerKV
 			qOff := (b*numHeads + h) * headSize
 			kOff := (b*numKVHeads + kvH) * kvHeadSize
 			vOff := kOff
 			oOff := qOff
-			var maskSlice []float64
+			var maskSlice []T
 			if mask != nil {
 				maskOff := b*maskBatchStride + h*maskHeadStride
 				maskSlice = mask[maskOff : maskOff+maskSliceLen]
 			}
-			sdpaFloat64(
+			sdpa(
 				q[qOff:qOff+headSize], k[kOff:kOff+kvHeadSize], v[vOff:vOff+kvHeadSize],
 				maskSlice, scores, output[oOff:oOff+headSize],
 				seqLen, kvLen, headDim, scale, causal,
@@ -662,7 +588,7 @@ func execFusedQKVDense(backend *Backend, node *Node, inputs []*Buffer, inputsOwn
 		if biasV != nil {
 			bvData = biasV.flat.([]float32)
 		}
-		qkvDenseFloat32(
+		qkvDense(
 			x.flat.([]float32), wQKV.flat.([]float32),
 			bqData, bkData, bvData,
 			qBuf.flat.([]float32), kBuf.flat.([]float32), vBuf.flat.([]float32),
@@ -679,7 +605,7 @@ func execFusedQKVDense(backend *Backend, node *Node, inputs []*Buffer, inputsOwn
 		if biasV != nil {
 			bvData = biasV.flat.([]float64)
 		}
-		qkvDenseFloat64(
+		qkvDense(
 			x.flat.([]float64), wQKV.flat.([]float64),
 			bqData, bkData, bvData,
 			qBuf.flat.([]float64), kBuf.flat.([]float64), vBuf.flat.([]float64),
@@ -692,22 +618,22 @@ func execFusedQKVDense(backend *Backend, node *Node, inputs []*Buffer, inputsOwn
 	return []*Buffer{qBuf, kBuf, vBuf}, nil
 }
 
-func qkvDenseFloat32(x, wQKV, biasQ, biasK, biasV, q, k, v []float32,
+func qkvDense[T float32 | float64](x, wQKV, biasQ, biasK, biasV, q, k, v []T,
 	batchSize, inFeatures, qDim, kvDim int,
 ) {
 	totalOut := qDim + 2*kvDim
 	// wQKV is [inFeatures, totalOut] row-major.
 	// Column layout: [0..qDim) = Q, [qDim..qDim+kvDim) = K, [qDim+kvDim..totalOut) = V.
-	for b := 0; b < batchSize; b++ {
+	for b := range batchSize {
 		xBase := b * inFeatures
 		qBase := b * qDim
 		kBase := b * kvDim
 		vBase := b * kvDim
 
 		// Q = x @ wQ + biasQ, where wQ = wQKV[:, 0:qDim]
-		for o := 0; o < qDim; o++ {
-			var sum float32
-			for i := 0; i < inFeatures; i++ {
+		for o := range qDim {
+			var sum T
+			for i := range inFeatures {
 				sum += x[xBase+i] * wQKV[i*totalOut+o]
 			}
 			if biasQ != nil {
@@ -716,9 +642,9 @@ func qkvDenseFloat32(x, wQKV, biasQ, biasK, biasV, q, k, v []float32,
 			q[qBase+o] = sum
 		}
 		// K = x @ wK + biasK, where wK = wQKV[:, qDim:qDim+kvDim]
-		for o := 0; o < kvDim; o++ {
-			var sum float32
-			for i := 0; i < inFeatures; i++ {
+		for o := range kvDim {
+			var sum T
+			for i := range inFeatures {
 				sum += x[xBase+i] * wQKV[i*totalOut+qDim+o]
 			}
 			if biasK != nil {
@@ -727,53 +653,9 @@ func qkvDenseFloat32(x, wQKV, biasQ, biasK, biasV, q, k, v []float32,
 			k[kBase+o] = sum
 		}
 		// V = x @ wV + biasV, where wV = wQKV[:, qDim+kvDim:]
-		for o := 0; o < kvDim; o++ {
-			var sum float32
-			for i := 0; i < inFeatures; i++ {
-				sum += x[xBase+i] * wQKV[i*totalOut+qDim+kvDim+o]
-			}
-			if biasV != nil {
-				sum += biasV[o]
-			}
-			v[vBase+o] = sum
-		}
-	}
-}
-
-func qkvDenseFloat64(x, wQKV, biasQ, biasK, biasV, q, k, v []float64,
-	batchSize, inFeatures, qDim, kvDim int,
-) {
-	totalOut := qDim + 2*kvDim
-	// wQKV is [inFeatures, totalOut] row-major.
-	for b := 0; b < batchSize; b++ {
-		xBase := b * inFeatures
-		qBase := b * qDim
-		kBase := b * kvDim
-		vBase := b * kvDim
-
-		for o := 0; o < qDim; o++ {
-			var sum float64
-			for i := 0; i < inFeatures; i++ {
-				sum += x[xBase+i] * wQKV[i*totalOut+o]
-			}
-			if biasQ != nil {
-				sum += biasQ[o]
-			}
-			q[qBase+o] = sum
-		}
-		for o := 0; o < kvDim; o++ {
-			var sum float64
-			for i := 0; i < inFeatures; i++ {
-				sum += x[xBase+i] * wQKV[i*totalOut+qDim+o]
-			}
-			if biasK != nil {
-				sum += biasK[o]
-			}
-			k[kBase+o] = sum
-		}
-		for o := 0; o < kvDim; o++ {
-			var sum float64
-			for i := 0; i < inFeatures; i++ {
+		for o := range kvDim {
+			var sum T
+			for i := range inFeatures {
 				sum += x[xBase+i] * wQKV[i*totalOut+qDim+kvDim+o]
 			}
 			if biasV != nil {

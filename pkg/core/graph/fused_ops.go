@@ -80,17 +80,20 @@ func InternalFusedOpCaller(fused, decomposed func() *Node) *Node {
 // FusedOpCallerMulti is the multi-output counterpart of InternalFusedOpCaller.
 // It handles fused ops that return multiple outputs (e.g. FusedQKVDense returning q, k, v).
 //
-// When the fused call succeeds, the decomposed version is also built and stored
-// as vjpAlternateOutputs on the multi-output parent node, so that reverse-mode
-// autodiff can compute gradients through the decomposed graph.
+// Like InternalFusedOpCaller, the decomposed version is built first so it has lower
+// node indices than the fused nodes. When the fused call succeeds, the decomposed
+// outputs are stored as vjpAlternateOutputs on the multi-output parent node for
+// reverse-mode autodiff.
 func FusedOpCallerMulti(fused, decomposed func() []*Node) []*Node {
+	decomposedOutputs := decomposed()
+
 	var outputs []*Node
 	err := exceptions.TryCatch[error](func() {
 		outputs = fused()
 	})
 	if err != nil {
 		if errors.Is(err, backends.ErrNotImplemented) {
-			return decomposed()
+			return decomposedOutputs
 		}
 		panic(err)
 	}
@@ -101,7 +104,7 @@ func FusedOpCallerMulti(fused, decomposed func() []*Node) []*Node {
 		firstSplit := outputs[0]
 		if splitInputs, ok := firstSplit.inputs.(*nodeInputsSplitNode); ok {
 			parent := splitInputs.multiOutputNode
-			parent.vjpAlternateOutputs = decomposed()
+			parent.vjpAlternateOutputs = decomposedOutputs
 		}
 	}
 
