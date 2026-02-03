@@ -1,9 +1,10 @@
 module github.com/gomlx/gomlx
 
-go 1.26
+go 1.26rc2
 
 require (
 	github.com/MetalBlueberry/go-plotly v0.7.0
+	github.com/ajroetker/go-highway v0.0.3
 	github.com/charmbracelet/lipgloss v1.1.0
 	github.com/dustin/go-humanize v1.0.1
 	github.com/erkkah/margaid v0.3.0
