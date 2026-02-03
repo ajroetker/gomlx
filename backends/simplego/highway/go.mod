@@ -3,7 +3,7 @@ module github.com/gomlx/gomlx/backends/simplego/highway
 go 1.26rc2
 
 require (
-	github.com/ajroetker/go-highway v0.0.0-dev12
+	github.com/ajroetker/go-highway v0.0.3
 	github.com/gomlx/gomlx v0.0.0
 	github.com/pkg/errors v0.9.1
 	github.com/stretchr/testify v1.11.1
