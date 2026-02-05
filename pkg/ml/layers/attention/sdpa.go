@@ -5,9 +5,114 @@ package attention
 import (
 	"math"
 
-	. "github.com/gomlx/gomlx/pkg/support/exceptions"
+	"github.com/gomlx/gomlx/pkg/core/dtypes"
 	. "github.com/gomlx/gomlx/pkg/core/graph"
+	. "github.com/gomlx/gomlx/pkg/support/exceptions"
 )
+
+// AxesLayout specifies the ordering of axes in the 4D attention tensors.
+// Different layouts use different Einsum equations but produce mathematically equivalent results.
+type AxesLayout int
+
+const (
+	// LayoutBHSD is the [batch, heads, seq, dim] layout used by PyTorch's F.scaled_dot_product_attention,
+	// ONNX, and most inference runtimes. This is the default for ScaledDotProductAttention.
+	LayoutBHSD AxesLayout = iota
+
+	// LayoutBSHD is the [batch, seq, heads, dim] layout used internally by MultiHeadAttention
+	// (after Dense projections which produce [batch, seq, heads, dim]).
+	LayoutBSHD
+)
+
+// String returns the name of the layout.
+func (l AxesLayout) String() string {
+	switch l {
+	case LayoutBHSD:
+		return "BHSD"
+	case LayoutBSHD:
+		return "BSHD"
+	default:
+		return "unknown"
+	}
+}
+
+// scoreEquation returns the Einsum equation for computing attention scores (Q @ K^T).
+func (l AxesLayout) scoreEquation() string {
+	switch l {
+	case LayoutBSHD:
+		return "bqhd,bkhd->bqhk"
+	default: // LayoutBHSD
+		return "bhqd,bhkd->bhqk"
+	}
+}
+
+// outputEquation returns the Einsum equation for computing weighted values (weights @ V).
+func (l AxesLayout) outputEquation() string {
+	switch l {
+	case LayoutBSHD:
+		return "bqhk,bkhd->bqhd"
+	default: // LayoutBHSD
+		return "bhqk,bhkd->bhqd"
+	}
+}
+
+// SeqAxis returns the axis index for the sequence dimension.
+func (l AxesLayout) SeqAxis() int {
+	switch l {
+	case LayoutBSHD:
+		return 1
+	default: // LayoutBHSD
+		return 2
+	}
+}
+
+// sdpaCore computes the core scaled dot-product attention operation.
+// This is the shared implementation used by both ScaledDotProductAttention and MultiHeadAttention.
+//
+// The layout parameter determines the axis ordering of the input tensors:
+//   - LayoutBHSD: [batch, heads, seq, dim] (PyTorch/ONNX convention)
+//   - LayoutBSHD: [batch, seq, heads, dim] (MHA convention)
+//
+// The additiveMask must match the score tensor layout:
+//   - LayoutBHSD: broadcastable to [batch, heads, q_seq, kv_seq]
+//   - LayoutBSHD: broadcastable to [batch, q_seq, heads, kv_seq]
+//
+// Returns output and optionally weights in the same layout as inputs.
+func sdpaCore(query, key, value *Node, scale float64, additiveMask *Node, returnWeights bool, layout AxesLayout) (*Node, *Node) {
+	// Compute attention scores using layout-specific equation
+	scores := Einsum(layout.scoreEquation(), query, key)
+	scores = MulScalar(scores, scale)
+
+	// Apply additive mask
+	if additiveMask != nil {
+		scores = Add(scores, additiveMask)
+	}
+
+	// Softmax over kv_seq dimension (always the last axis in the score tensor)
+	weights := Softmax(scores, -1)
+
+	// Compute output using layout-specific equation
+	output := Einsum(layout.outputEquation(), weights, value)
+
+	if returnWeights {
+		return output, weights
+	}
+	return output, nil
+}
+
+// booleanToAdditiveMask converts a boolean attention mask to an additive mask.
+// True means attend (adds 0), False means mask out (adds large negative value).
+// The dtype parameter specifies the output dtype (should match the scores dtype).
+func booleanToAdditiveMask(booleanMask *Node, dtype dtypes.DType) *Node {
+	g := booleanMask.Graph()
+
+	largeNeg := ScalarOne(g, dtype)
+	largeNeg = MulScalar(largeNeg, -1e9)
+	zero := ScalarZero(g, dtype)
+
+	// Where mask is true, add 0; where false, add large negative
+	return Where(booleanMask, zero, largeNeg)
+}
 
 // ScaledDotProductAttentionBuilder configures and executes scaled dot-product attention.
 // Create it with ScaledDotProductAttention, configure with builder methods, and call Done.
@@ -17,6 +122,7 @@ type ScaledDotProductAttentionBuilder struct {
 	hasCustomScale    bool
 	additiveMask      *Node
 	booleanMask       *Node
+	layout            AxesLayout // default LayoutBHSD
 }
 
 // ScaledDotProductAttention creates a builder for computing scaled dot-product attention.
@@ -48,15 +154,28 @@ func (b *ScaledDotProductAttentionBuilder) WithScale(scale float64) *ScaledDotPr
 }
 
 // WithAdditiveMask sets an additive attention mask that is added to the attention scores
-// before softmax. The mask should be broadcastable to [batch, heads, q_seq, kv_seq].
+// before softmax. The mask should be broadcastable to the score tensor shape, which depends on the layout:
+//   - LayoutBHSD: [batch, heads, q_seq, kv_seq]
+//   - LayoutBSHD: [batch, q_seq, heads, kv_seq]
+//
 // Typical values: 0 for positions to attend, large negative values (e.g., -1e9) for masked positions.
 func (b *ScaledDotProductAttentionBuilder) WithAdditiveMask(mask *Node) *ScaledDotProductAttentionBuilder {
 	b.additiveMask = mask
 	return b
 }
 
+// WithLayout sets the axes layout for the input tensors.
+// Default is LayoutBHSD [batch, heads, seq, dim].
+// Use LayoutBSHD for [batch, seq, heads, dim] layout.
+func (b *ScaledDotProductAttentionBuilder) WithLayout(layout AxesLayout) *ScaledDotProductAttentionBuilder {
+	b.layout = layout
+	return b
+}
+
 // WithBooleanMask sets a boolean attention mask. True means attend, false means mask out.
-// The mask should be broadcastable to [batch, heads, q_seq, kv_seq].
+// The mask should be broadcastable to the score tensor shape, which depends on the layout:
+//   - LayoutBHSD: [batch, heads, q_seq, kv_seq]
+//   - LayoutBSHD: [batch, q_seq, heads, kv_seq]
 func (b *ScaledDotProductAttentionBuilder) WithBooleanMask(mask *Node) *ScaledDotProductAttentionBuilder {
 	b.booleanMask = mask
 	return b
@@ -97,39 +216,18 @@ func (b *ScaledDotProductAttentionBuilder) execute(returnWeights bool) (*Node, *
 		scale = 1.0 / math.Sqrt(float64(headDim))
 	}
 
-	// Compute attention scores: Q @ K^T * scale
-	// query: [batch, heads, q_seq, head_dim]
-	// key:   [batch, heads, kv_seq, head_dim]
-	// scores: [batch, heads, q_seq, kv_seq]
-	scores := Einsum("bhqd,bhkd->bhqk", query, key)
-	scores = MulScalar(scores, scale)
-
-	// Apply boolean mask: convert to additive mask
+	// Build combined additive mask from boolean and additive masks
+	var additiveMask *Node
 	if b.booleanMask != nil {
-		// Where mask is false, set to large negative value
-		largeNeg := ScalarOne(scores.Graph(), scores.DType())
-		largeNeg = MulScalar(largeNeg, -1e9)
-		// Where mask is true, add 0; where false, add large negative
-		maskAdditive := Where(b.booleanMask, ScalarZero(scores.Graph(), scores.DType()), largeNeg)
-		scores = Add(scores, maskAdditive)
+		additiveMask = booleanToAdditiveMask(b.booleanMask, query.DType())
 	}
-
-	// Apply additive mask
 	if b.additiveMask != nil {
-		scores = Add(scores, b.additiveMask)
+		if additiveMask != nil {
+			additiveMask = Add(additiveMask, b.additiveMask)
+		} else {
+			additiveMask = b.additiveMask
+		}
 	}
 
-	// Softmax over kv_seq dimension
-	weights := Softmax(scores, -1)
-
-	// Compute output: weights @ value
-	// weights: [batch, heads, q_seq, kv_seq]
-	// value:   [batch, heads, kv_seq, v_head_dim]
-	// output:  [batch, heads, q_seq, v_head_dim]
-	output := Einsum("bhqk,bhkd->bhqd", weights, value)
-
-	if returnWeights {
-		return output, weights
-	}
-	return output, nil
+	return sdpaCore(query, key, value, scale, additiveMask, returnWeights, b.layout)
 }
