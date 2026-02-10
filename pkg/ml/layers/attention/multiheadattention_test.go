@@ -42,6 +42,29 @@ func TestMultiHeadAttentionGraph(t *testing.T) {
 		assert.EqualValues(t, []int{batchSize, 7, 1, 6, 4, 5}, attCoef.Shape().Dimensions, "AttentionCoefficients shape mismatch")
 	}
 
+	// Higher-rank with key mask: verifies that masks are correctly flattened alongside Q/K/V
+	// when inner axes are > 1, and that the graph executes without errors.
+	{
+		ctx := context.New()
+		batchSize := 2
+		exec := context.MustNewExec(backend, ctx, func(ctx *context.Context, input *Node) (*Node, *Node) {
+			g := input.Graph()
+			key := IotaFull(g, shapes.Make(dtypes.Float32, batchSize, 3, 4, 5))
+			query := IotaFull(g, shapes.Make(dtypes.Float32, batchSize, 6, 1, 3))
+			value := IotaFull(g, shapes.Make(dtypes.Float32, batchSize, 3, 4, 7))
+			// keyMask shape: [batch, 3, 4] — one mask per key inner element, same for all heads.
+			keyMask := Const(g, true)
+			keyMask = BroadcastToDims(keyMask, batchSize, 3, 4)
+			return MultiHeadAttention(ctx, query, key, value, 2, 8).
+				SetKeyMask(keyMask).
+				SetOutputDim(9).DoneWithCoefficients()
+		})
+		// Pass a dummy input to trigger execution.
+		results := exec.MustExec(tensors.FromScalar(float32(0)))
+		assert.EqualValues(t, []int{batchSize, 6, 1, 9}, results[0].Shape().Dimensions, "Higher-rank masked output shape")
+		assert.EqualValues(t, []int{batchSize, 6, 1, 2, 3, 4}, results[1].Shape().Dimensions, "Higher-rank masked coef shape")
+	}
+
 	ctxtest.RunTestGraphFn(t, "MultiHeadAttention with masking",
 		func(ctx *context.Context, g *Graph) (inputs, outputs []*Node) {
 			batchSize := 2
@@ -150,9 +173,9 @@ func TestMultiHeadAttentionWithRoPE(t *testing.T) {
 	output := exec.MustExec(input)[0]
 	assert.Equal(t, []int{1, 4, 8}, output.Shape().Dimensions)
 
-	// Run a second time with different sequence length to verify dynamic shapes
-	ctx2 := context.New()
-	exec2 := context.MustNewExec(backend, ctx2, func(ctx *context.Context, x *Node) *Node {
+	// Run a second time with different sequence length to verify re-compilation
+	// with the same weights (reuse ctx so Dense parameters are shared).
+	exec2 := context.MustNewExec(backend, ctx.Reuse(), func(ctx *context.Context, x *Node) *Node {
 		return SelfAttention(ctx, x, 2, 4).
 			WithRoPE(10000.0).
 			UseCausalMask().
@@ -164,6 +187,79 @@ func TestMultiHeadAttentionWithRoPE(t *testing.T) {
 
 	output2 := exec2.MustExec(input2)[0]
 	assert.Equal(t, []int{1, 2, 8}, output2.Shape().Dimensions)
+}
+
+func TestMultiHeadAttentionWithQKVProjection(t *testing.T) {
+	backend := graphtest.BuildTestBackend()
+
+	t.Run("basic", func(t *testing.T) {
+		ctx := context.New()
+		exec := context.MustNewExec(backend, ctx, func(ctx *context.Context, x *Node) *Node {
+			return SelfAttention(ctx, x, 2, 4).
+				UseQKVProjection().
+				Done()
+		})
+
+		// [batch=2, seq=3, embed=8]
+		input := [][][]float32{
+			{{1, 2, 3, 4, 5, 6, 7, 8}, {9, 10, 11, 12, 13, 14, 15, 16}, {17, 18, 19, 20, 21, 22, 23, 24}},
+			{{25, 26, 27, 28, 29, 30, 31, 32}, {33, 34, 35, 36, 37, 38, 39, 40}, {41, 42, 43, 44, 45, 46, 47, 48}},
+		}
+		output := exec.MustExec(input)[0]
+		assert.Equal(t, []int{2, 3, 8}, output.Shape().Dimensions)
+	})
+
+	t.Run("with_causal_mask", func(t *testing.T) {
+		ctx := context.New()
+		exec := context.MustNewExec(backend, ctx, func(ctx *context.Context, x *Node) *Node {
+			return SelfAttention(ctx, x, 2, 4).
+				UseQKVProjection().
+				UseCausalMask().
+				Done()
+		})
+
+		input := [][][]float32{
+			{{1, 2, 3, 4, 5, 6, 7, 8}, {9, 10, 11, 12, 13, 14, 15, 16}, {17, 18, 19, 20, 21, 22, 23, 24}},
+		}
+		output := exec.MustExec(input)[0]
+		assert.Equal(t, []int{1, 3, 8}, output.Shape().Dimensions)
+	})
+
+	t.Run("with_coefficients", func(t *testing.T) {
+		ctx := context.New()
+		exec := context.MustNewExec(backend, ctx, func(ctx *context.Context, x *Node) []*Node {
+			output, coef := SelfAttention(ctx, x, 2, 4).
+				UseQKVProjection().
+				DoneWithCoefficients()
+			return []*Node{output, coef}
+		})
+
+		input := [][][]float32{
+			{{1, 2, 3, 4, 5, 6, 7, 8}, {9, 10, 11, 12, 13, 14, 15, 16}, {17, 18, 19, 20, 21, 22, 23, 24}},
+		}
+		outputs := exec.MustExec(input)
+		assert.Equal(t, []int{1, 3, 8}, outputs[0].Shape().Dimensions)
+		// coefficients: [batch, query_seq, num_heads, key_seq]
+		assert.Equal(t, []int{1, 3, 2, 3}, outputs[1].Shape().Dimensions)
+	})
+
+	t.Run("no_output_bias", func(t *testing.T) {
+		// UseProjectionBias(false) disables only the output projection bias;
+		// QKV biases are always present (matching the separate Dense path).
+		ctx := context.New()
+		exec := context.MustNewExec(backend, ctx, func(ctx *context.Context, x *Node) *Node {
+			return SelfAttention(ctx, x, 2, 4).
+				UseQKVProjection().
+				UseProjectionBias(false).
+				Done()
+		})
+
+		input := [][][]float32{
+			{{1, 2, 3, 4, 5, 6, 7, 8}, {9, 10, 11, 12, 13, 14, 15, 16}, {17, 18, 19, 20, 21, 22, 23, 24}},
+		}
+		output := exec.MustExec(input)[0]
+		assert.Equal(t, []int{1, 3, 8}, output.Shape().Dimensions)
+	})
 }
 
 // buildSyntheticAttentionModelFn builds a model graph building function that does a regression on the elements

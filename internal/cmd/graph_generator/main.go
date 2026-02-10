@@ -51,7 +51,7 @@ var (
 
 		// Fused ops: exported wrappers with "Internal:" comments are hand-written in fused_ops.go.
 		"FusedDense", "FusedGelu", "FusedLayerNorm", "FusedSoftmax",
-		"FusedMultiHeadSDPA", "FusedQKVDense")
+		"FusedScaledDotProductAttention", "FusedAttentionQKVProjection")
 
 	// methodsNotGenerated get a NodeType but no auto-generated wrapper
 	// (hand-written implementations).
@@ -63,8 +63,8 @@ var (
 	nillableParams = sets.MakeWith(
 		"FusedLayerNorm.gamma", "FusedLayerNorm.beta",
 		"FusedDense.bias",
-		"FusedMultiHeadSDPA.mask",
-		"FusedQKVDense.biasQ", "FusedQKVDense.biasK", "FusedQKVDense.biasV",
+		"FusedScaledDotProductAttention.mask",
+		"FusedAttentionQKVProjection.biasQ", "FusedAttentionQKVProjection.biasK", "FusedAttentionQKVProjection.biasV",
 	)
 
 	// methodsExcluded from generating and even from having a NodeType.
@@ -167,6 +167,9 @@ func buildMethodInfo() (methods []*MethodInfo) {
 				pi.BackendType = "backends." + pi.BackendType
 				pi.Format = "%s"
 			case "ActivationType":
+				pi.BackendType = "backends." + pi.BackendType
+				pi.Format = "%s"
+			case "AxesLayout":
 				pi.BackendType = "backends." + pi.BackendType
 				pi.Format = "%s"
 			default:
