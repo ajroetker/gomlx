@@ -621,10 +621,11 @@ func sdpaMultiHeadGeneric[T float32 | float64](query, key, value, mask, output *
 func execFusedAttentionQKVProjection(backend *Backend, node *Node, inputs []*Buffer, inputsOwned []bool) ([]*Buffer, error) {
 	data := node.data.(*nodeFusedAttentionQKVProjection)
 	combined := inputs[0] // DotGeneral result: [batch, qDim+2*kvDim]
+	// inputs[1] = x, inputs[2] = wQKV (included for highway executor, unused here).
 
 	// Determine bias buffers using flags from node data, not positional indexing.
 	var biasQ, biasK, biasV *Buffer
-	biasIdx := 1
+	biasIdx := 3
 	if data.hasBiasQ {
 		biasQ = inputs[biasIdx]
 		biasIdx++

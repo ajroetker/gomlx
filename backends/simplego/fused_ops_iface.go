@@ -47,24 +47,30 @@ func DenseParams(node *Node) backends.ActivationType {
 	return node.data.(*nodeFusedDense).activation
 }
 
-// MultiHeadSDPAParams extracts the parameters from a MultiHeadSDPA node.
-func MultiHeadSDPAParams(node *Node) (numHeads, numKVHeads int, scale float64, causal bool) {
-	data := node.data.(*nodeFusedMultiHeadSDPA)
-	return data.numHeads, data.numKVHeads, data.scale, data.causal
+// SDPAParams extracts the parameters from a FusedScaledDotProductAttention node.
+func SDPAParams(node *Node) (numHeads, numKVHeads int, axesLayout backends.AxesLayout, scale float64, causal bool) {
+	data := node.data.(*nodeFusedScaledDotProductAttention)
+	return data.numHeads, data.numKVHeads, data.axesLayout, data.scale, data.causal
 }
 
-// QKVDenseParams extracts the parameters from a QKVDense node.
-func QKVDenseParams(node *Node) (qDim, kvDim int) {
-	data := node.data.(*nodeFusedQKVDense)
+// QKVProjectionParams extracts the parameters from a FusedAttentionQKVProjection node.
+func QKVProjectionParams(node *Node) (qDim, kvDim int) {
+	data := node.data.(*nodeFusedAttentionQKVProjection)
 	return data.qDim, data.kvDim
 }
 
-// QKVDenseOutputBuffers allocates the three output buffers (q, k, v) for a QKVDense node.
-func QKVDenseOutputBuffers(backend *Backend, node *Node) (q, k, v *Buffer) {
+// QKVProjectionOutputBuffers allocates the three output buffers (q, k, v) for a QKVProjection node.
+func QKVProjectionOutputBuffers(backend *Backend, node *Node) (q, k, v *Buffer) {
 	outShapes := node.multiOutputsShapes
 	return backend.getBufferForShape(outShapes[0]),
 		backend.getBufferForShape(outShapes[1]),
 		backend.getBufferForShape(outShapes[2])
+}
+
+// TransposeBuffer transposes a buffer according to the given axis permutation.
+// Used by the highway subpackage for transposing BSHD masks to BHSD layout.
+func TransposeBuffer(backend *Backend, buf *Buffer, permutations []int) *Buffer {
+	return transposeBuffer(backend, buf, permutations)
 }
 
 // LayerNormFloat32Fallback is the scalar implementation of LayerNorm for float32.

@@ -273,9 +273,11 @@ func (f *Function) FusedAttentionQKVProjection(x, wQKV, biasQ, biasK, biasV back
 	}
 	dotNode := dotResult.(*Node)
 
-	// FusedAttentionQKVProjection inputs: [dotResult, biasQ?, biasK?, biasV?].
+	// FusedAttentionQKVProjection inputs: [dotResult, x, wQKV, biasQ?, biasK?, biasV?].
 	// The matmul is already computed by the DotGeneral sub-node (inputs[0]).
-	fusedInputs := []*Node{dotNode}
+	// x and wQKV are included so that SIMD-accelerated executors (highway) can
+	// redo the fused matmul+split+bias from scratch.
+	fusedInputs := []*Node{dotNode, xNode, wNode}
 	if biasQ != nil {
 		fusedInputs = append(fusedInputs, inputs[2])
 	}

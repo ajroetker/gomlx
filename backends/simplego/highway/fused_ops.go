@@ -18,8 +18,8 @@ func init() {
 	simplego.SetNodeExecutor(backends.OpTypeFusedGelu, simplego.RegisterPriorityArch, execGeluHighway)
 	simplego.SetNodeExecutor(backends.OpTypeFusedLayerNorm, simplego.RegisterPriorityArch, execLayerNormHighway)
 	simplego.SetNodeExecutor(backends.OpTypeFusedDense, simplego.RegisterPriorityArch, execDenseActivationHighway)
-	simplego.SetNodeExecutor(backends.OpTypeFusedMultiHeadSDPA, simplego.RegisterPriorityArch, execMultiHeadSDPAHighway)
-	simplego.SetMultiOutputsNodeExecutor(backends.OpTypeFusedQKVDense, simplego.RegisterPriorityArch, execQKVDenseHighway)
+	simplego.SetNodeExecutor(backends.OpTypeFusedScaledDotProductAttention, simplego.RegisterPriorityArch, execSDPAHighway)
+	simplego.SetMultiOutputsNodeExecutor(backends.OpTypeFusedAttentionQKVProjection, simplego.RegisterPriorityArch, execQKVProjectionHighway)
 }
 
 // computeAxisStrides decomposes a shape into (outerSize, axisSize, innerSize) for
@@ -241,23 +241,25 @@ func execDenseHighway(backend *simplego.Backend, node *simplego.Node, inputs []*
 	return output, nil
 }
 
-// execQKVDenseHighway implements SIMD-accelerated fused QKV projection.
+// execQKVProjectionHighway implements SIMD-accelerated fused QKV projection.
 // Weight wQKV is [inFeatures, totalOut] (ONNX convention). We transpose to [totalOut, inFeatures]
 // for nn.QKVDenseAuto which uses MatMulKLastAuto (K-last / PyTorch convention).
-func execQKVDenseHighway(backend *simplego.Backend, node *simplego.Node, inputs []*simplego.Buffer, inputsOwned []bool) ([]*simplego.Buffer, error) {
-	x := inputs[0]
-	wQKV := inputs[1]
+func execQKVProjectionHighway(backend *simplego.Backend, node *simplego.Node, inputs []*simplego.Buffer, inputsOwned []bool) ([]*simplego.Buffer, error) {
+	// inputs layout: [dotResult, x, wQKV, biasQ?, biasK?, biasV?]
+	// We ignore dotResult (inputs[0]) and redo the fused matmul+split+bias from x and wQKV.
+	x := inputs[1]
+	wQKV := inputs[2]
 
-	qDim, kvDim := simplego.QKVDenseParams(node)
+	qDim, kvDim := simplego.QKVProjectionParams(node)
 	totalOut := qDim + 2*kvDim
 
-	qBuf, kBuf, vBuf := simplego.QKVDenseOutputBuffers(backend, node)
+	qBuf, kBuf, vBuf := simplego.QKVProjectionOutputBuffers(backend, node)
 
 	inFeatures := x.Shape().Dimensions[x.Shape().Rank()-1]
 	batchSize := x.Shape().Size() / inFeatures
 
 	var biasQ, biasK, biasV *simplego.Buffer
-	biasIdx := 2
+	biasIdx := 3
 	if biasIdx < len(inputs) {
 		biasQ = inputs[biasIdx]
 		biasIdx++
@@ -342,12 +344,15 @@ func computeMaskStrides(dims []int) (batchStride, headStride int) {
 	}
 }
 
-// execMultiHeadSDPAHighway implements SIMD-accelerated multi-head scaled dot-product attention.
-// q: [batch, numHeads, seqLen, headDim], k/v: [batch, numKVHeads, kvLen, headDim]
-// mask: optional additive mask of rank 2–4 (broadcasting via strides)
-// output: [batch, numHeads, seqLen, headDim]
-func execMultiHeadSDPAHighway(backend *simplego.Backend, node *simplego.Node, inputs []*simplego.Buffer, inputsOwned []bool) (*simplego.Buffer, error) {
-	numHeads, numKVHeads, scale, causal := simplego.MultiHeadSDPAParams(node)
+// execSDPAHighway implements SIMD-accelerated multi-head scaled dot-product attention.
+//
+// Both BHSD [batch, heads, seq, dim] and BSHD [batch, seq, heads, dim] layouts are
+// supported via nn.MultiHeadSDPAStridedAuto. For BHSD the strided API fast-paths to
+// the contiguous kernel with zero overhead. For BSHD it gathers each head into a
+// contiguous temp buffer, runs the optimized single-head SDPA, and scatters back.
+func execSDPAHighway(backend *simplego.Backend, node *simplego.Node, inputs []*simplego.Buffer, inputsOwned []bool) (*simplego.Buffer, error) {
+	numHeads, numKVHeads, axesLayout, scale, causal := simplego.SDPAParams(node)
+
 	q := inputs[0]
 	k := inputs[1]
 	v := inputs[2]
@@ -355,14 +360,49 @@ func execMultiHeadSDPAHighway(backend *simplego.Backend, node *simplego.Node, in
 	if len(inputs) > 3 {
 		mask = inputs[3]
 	}
+
+	// For rank-4 BSHD masks [batch, seq, heads, kvLen], transpose to BHSD
+	// [batch, heads, seq, kvLen] so per-head mask data is contiguous.
+	if axesLayout == backends.AxesLayoutBSHD && mask != nil && mask.Shape().Rank() == 4 {
+		mask = simplego.TransposeBuffer(backend, mask, []int{0, 2, 1, 3})
+	}
+
 	output := simplego.FusedOpOutput(backend, node)
 
-	batchSize := q.Shape().Dimensions[0]
-	seqLen := q.Shape().Dimensions[2]
-	kvLen := k.Shape().Dimensions[2]
-	headDim := q.Shape().Dimensions[3]
+	// Compute layout-dependent strides.
+	dims := q.Shape().Dimensions
+	batchSize := dims[0]
+	var seqLen, kvLen, headDim int
+	var qBatchStride, qHeadStride, qSeqStride int
+	var kvBatchStride, kvHeadStride, kvSeqStride int
 
-	// Compute mask strides for broadcasting.
+	if axesLayout == backends.AxesLayoutBSHD {
+		// [batch, seq, heads, dim]
+		seqLen = dims[1]
+		headDim = dims[3]
+		kvDims := k.Shape().Dimensions
+		kvLen = kvDims[1]
+		qSeqStride = numHeads * headDim
+		kvSeqStride = numKVHeads * headDim
+		qHeadStride = headDim
+		kvHeadStride = headDim
+		qBatchStride = seqLen * numHeads * headDim
+		kvBatchStride = kvLen * numKVHeads * headDim
+	} else {
+		// BHSD: [batch, heads, seq, dim]
+		seqLen = dims[2]
+		headDim = dims[3]
+		kvDims := k.Shape().Dimensions
+		kvLen = kvDims[2]
+		qSeqStride = headDim
+		kvSeqStride = headDim
+		qHeadStride = seqLen * headDim
+		kvHeadStride = kvLen * headDim
+		qBatchStride = numHeads * seqLen * headDim
+		kvBatchStride = numKVHeads * kvLen * headDim
+	}
+
+	// Compute mask strides for broadcasting (mask is always in BHSD convention after transpose).
 	var maskBatchStride, maskHeadStride int
 	if mask != nil {
 		maskBatchStride, maskHeadStride = computeMaskStrides(mask.Shape().Dimensions)
@@ -374,10 +414,12 @@ func execMultiHeadSDPAHighway(backend *simplego.Backend, node *simplego.Node, in
 		if mask != nil {
 			maskData = mask.Flat().([]float32)
 		}
-		nn.MultiHeadSDPAAuto(hwyPool,
+		nn.MultiHeadSDPAStridedAuto(hwyPool,
 			q.Flat().([]float32), k.Flat().([]float32), v.Flat().([]float32),
 			maskData, output.Flat().([]float32),
 			batchSize, numHeads, numKVHeads, seqLen, kvLen, headDim,
+			qBatchStride, qHeadStride, qSeqStride,
+			kvBatchStride, kvHeadStride, kvSeqStride,
 			maskBatchStride, maskHeadStride,
 			float32(scale), causal,
 		)
@@ -386,15 +428,17 @@ func execMultiHeadSDPAHighway(backend *simplego.Backend, node *simplego.Node, in
 		if mask != nil {
 			maskData = mask.Flat().([]float64)
 		}
-		nn.MultiHeadSDPAAuto(hwyPool,
+		nn.MultiHeadSDPAStridedAuto(hwyPool,
 			q.Flat().([]float64), k.Flat().([]float64), v.Flat().([]float64),
 			maskData, output.Flat().([]float64),
 			batchSize, numHeads, numKVHeads, seqLen, kvLen, headDim,
+			qBatchStride, qHeadStride, qSeqStride,
+			kvBatchStride, kvHeadStride, kvSeqStride,
 			maskBatchStride, maskHeadStride,
 			scale, causal,
 		)
 	default:
-		return nil, errors.Errorf("highway MultiHeadSDPA: unsupported dtype %s", q.DType())
+		return nil, errors.Errorf("highway SDPA: unsupported dtype %s", q.DType())
 	}
 	return output, nil
 }
