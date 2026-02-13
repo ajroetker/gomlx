@@ -3,6 +3,8 @@
 package highway
 
 import (
+	"math"
+
 	"github.com/ajroetker/go-highway/hwy/contrib/activation"
 	"github.com/ajroetker/go-highway/hwy/contrib/matmul"
 	"github.com/ajroetker/go-highway/hwy/contrib/nn"
@@ -413,7 +415,11 @@ func execSDPAHighway(backend *simplego.Backend, node *simplego.Node, inputs []*s
 	case dtypes.Float32:
 		var maskData []float32
 		if mask != nil {
-			maskData = mask.Flat().([]float32)
+			if mask.Shape().DType == dtypes.Bool {
+				maskData = boolToAdditiveMask[float32](mask.Flat().([]bool))
+			} else {
+				maskData = mask.Flat().([]float32)
+			}
 		}
 		nn.MultiHeadSDPAStridedAuto(hwyPool,
 			q.Flat().([]float32), k.Flat().([]float32), v.Flat().([]float32),
@@ -427,7 +433,11 @@ func execSDPAHighway(backend *simplego.Backend, node *simplego.Node, inputs []*s
 	case dtypes.Float64:
 		var maskData []float64
 		if mask != nil {
-			maskData = mask.Flat().([]float64)
+			if mask.Shape().DType == dtypes.Bool {
+				maskData = boolToAdditiveMask[float64](mask.Flat().([]bool))
+			} else {
+				maskData = mask.Flat().([]float64)
+			}
 		}
 		nn.MultiHeadSDPAStridedAuto(hwyPool,
 			q.Flat().([]float64), k.Flat().([]float64), v.Flat().([]float64),
@@ -442,6 +452,19 @@ func execSDPAHighway(backend *simplego.Backend, node *simplego.Node, inputs []*s
 		return nil, errors.Errorf("highway SDPA: unsupported dtype %s", q.DType())
 	}
 	return output, nil
+}
+
+// boolToAdditiveMask converts a boolean mask to an additive float mask.
+// true (attend) → 0, false (mask out) → -inf.
+func boolToAdditiveMask[T ~float32 | ~float64](boolMask []bool) []T {
+	out := make([]T, len(boolMask))
+	negInf := T(math.Inf(-1))
+	for i, v := range boolMask {
+		if !v {
+			out[i] = negInf
+		}
+	}
+	return out
 }
 
 // backendToMatmulActivation converts a backends.ActivationType to the go-highway matmul.ActivationType.
