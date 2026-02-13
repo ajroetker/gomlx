@@ -67,10 +67,22 @@ func QKVProjectionOutputBuffers(backend *Backend, node *Node) (q, k, v *Buffer) 
 		backend.getBufferForShape(outShapes[2])
 }
 
+// QuantizedDenseParams extracts the parameters from a FusedQuantizedDense node.
+func QuantizedDenseParams(node *Node) (quantFormat backends.QuantFormat, groupSize int, outFeatures int, activation backends.ActivationType) {
+	data := node.data.(*nodeFusedQuantizedDense)
+	return data.quantFormat, data.groupSize, data.outFeatures, data.activation
+}
+
 // TransposeBuffer transposes a buffer according to the given axis permutation.
 // Used by the highway subpackage for transposing BSHD masks to BHSD layout.
 func TransposeBuffer(backend *Backend, buf *Buffer, permutations []int) *Buffer {
 	return transposeBuffer(backend, buf, permutations)
+}
+
+// ApplyActivationFloat32 applies an activation function to float32 data in-place.
+// Used by the highway subpackage for activations not directly supported by go-highway kernels.
+func ApplyActivationFloat32(backend *Backend, data []float32, activation backends.ActivationType) {
+	fusedDenseApplyActivation(backend, data, activation)
 }
 
 // LayerNormFloat32Fallback is the scalar implementation of LayerNorm for float32.

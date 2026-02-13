@@ -77,6 +77,19 @@ type nodeFusedAttentionQKVProjection struct {
 	hasBiasV bool
 }
 
+type nodeFusedQuantizedDense struct {
+	quantFormat backends.QuantFormat
+	groupSize   int
+	outFeatures int
+	activation  backends.ActivationType
+}
+
+func (d *nodeFusedQuantizedDense) EqualNodeData(other nodeDataComparable) bool {
+	o := other.(*nodeFusedQuantizedDense)
+	return d.quantFormat == o.quantFormat && d.groupSize == o.groupSize &&
+		d.outFeatures == o.outFeatures && d.activation == o.activation
+}
+
 // FusedSoftmax computes softmax along the specified axis.
 // The axis must be non-negative (the caller normalizes negative indices).
 func (f *Function) FusedSoftmax(x backends.Value, axis int) (backends.Value, error) {
@@ -300,4 +313,74 @@ func (f *Function) FusedAttentionQKVProjection(x, wQKV, biasQ, biasK, biasV back
 	keyOut = node.multiOutputsNodes[1]
 	valueOut = node.multiOutputsNodes[2]
 	return
+}
+
+// FusedQuantizedDense performs fused dequantization + matmul + optional bias + optional activation.
+//
+// Unlike FusedDense, this does not create a DotGeneral sub-node — the quantized matmul
+// is fundamentally different (mixed-dtype with per-group scales). The inputs to the
+// executor are [x, packedWeights, scales, bias?] directly.
+func (f *Function) FusedQuantizedDense(x, packedWeights, scales, bias backends.Value,
+	quantFormat backends.QuantFormat, groupSize int, outFeatures int,
+	activation backends.ActivationType) (backends.Value, error) {
+
+	values := []backends.Value{x, packedWeights, scales}
+	if bias != nil {
+		values = append(values, bias)
+	}
+	inputs, err := f.verifyAndCastValues("FusedQuantizedDense", values...)
+	if err != nil {
+		return nil, err
+	}
+	xNode := inputs[0]
+	wNode := inputs[1]
+	sNode := inputs[2]
+
+	// Validate x shape: [batch..., K]
+	if xNode.shape.Rank() < 1 {
+		return nil, errors.Errorf("FusedQuantizedDense: x must have rank >= 1, got %d", xNode.shape.Rank())
+	}
+	K := xNode.shape.Dimensions[xNode.shape.Rank()-1]
+	N := outFeatures
+
+	// Validate packed weight shape based on format.
+	switch quantFormat {
+	case backends.QuantNF4, backends.QuantInt4:
+		// Expected: [K, N/2] uint8
+		packedN := (N + 1) / 2
+		if wNode.shape.Rank() != 2 || wNode.shape.Dimensions[0] != K || wNode.shape.Dimensions[1] != packedN {
+			return nil, errors.Errorf("FusedQuantizedDense: %s packed weights must be [%d, %d], got %v",
+				quantFormat, K, packedN, wNode.shape.Dimensions)
+		}
+	case backends.QuantInt8:
+		// Expected: [K, N] int8
+		if wNode.shape.Rank() != 2 || wNode.shape.Dimensions[0] != K || wNode.shape.Dimensions[1] != N {
+			return nil, errors.Errorf("FusedQuantizedDense: Int8 weights must be [%d, %d], got %v",
+				K, N, wNode.shape.Dimensions)
+		}
+	default:
+		return nil, errors.Errorf("FusedQuantizedDense: unknown quant format %d", quantFormat)
+	}
+
+	// Validate scales shape: [K, numGroups]
+	numGroups := (N + groupSize - 1) / groupSize
+	if sNode.shape.Rank() != 2 || sNode.shape.Dimensions[0] != K || sNode.shape.Dimensions[1] != numGroups {
+		return nil, errors.Errorf("FusedQuantizedDense: scales must be [%d, %d], got %v",
+			K, numGroups, sNode.shape.Dimensions)
+	}
+
+	// Output shape: [batch..., N]
+	outDims := make([]int, xNode.shape.Rank())
+	copy(outDims, xNode.shape.Dimensions[:xNode.shape.Rank()-1])
+	outDims[xNode.shape.Rank()-1] = N
+	outShape := shapes.Make(xNode.shape.DType, outDims...)
+
+	data := &nodeFusedQuantizedDense{
+		quantFormat: quantFormat,
+		groupSize:   groupSize,
+		outFeatures: outFeatures,
+		activation:  activation,
+	}
+	node, _ := f.getOrCreateNode(backends.OpTypeFusedQuantizedDense, outShape, inputs, data)
+	return node, nil
 }

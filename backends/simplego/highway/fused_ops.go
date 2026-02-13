@@ -19,6 +19,7 @@ func init() {
 	simplego.SetNodeExecutor(backends.OpTypeFusedLayerNorm, simplego.RegisterPriorityArch, execLayerNormHighway)
 	simplego.SetNodeExecutor(backends.OpTypeFusedDense, simplego.RegisterPriorityArch, execDenseActivationHighway)
 	simplego.SetNodeExecutor(backends.OpTypeFusedScaledDotProductAttention, simplego.RegisterPriorityArch, execSDPAHighway)
+	simplego.SetNodeExecutor(backends.OpTypeFusedQuantizedDense, simplego.RegisterPriorityArch, execQuantizedDenseHighway)
 	simplego.SetMultiOutputsNodeExecutor(backends.OpTypeFusedAttentionQKVProjection, simplego.RegisterPriorityArch, execQKVProjectionHighway)
 }
 
@@ -440,6 +441,84 @@ func execSDPAHighway(backend *simplego.Backend, node *simplego.Node, inputs []*s
 	default:
 		return nil, errors.Errorf("highway SDPA: unsupported dtype %s", q.DType())
 	}
+	return output, nil
+}
+
+// backendToMatmulActivation converts a backends.ActivationType to the go-highway matmul.ActivationType.
+// Returns (matmulAct, ok). ok is false if the activation has no direct matmul equivalent (e.g. Tanh).
+func backendToMatmulActivation(act backends.ActivationType) (matmul.ActivationType, bool) {
+	switch act {
+	case backends.ActivationNone:
+		return matmul.ActNone, true
+	case backends.ActivationSilu:
+		return matmul.ActSiLU, true
+	case backends.ActivationGelu:
+		return matmul.ActGELU, true
+	case backends.ActivationRelu:
+		return matmul.ActReLU, true
+	default:
+		return matmul.ActNone, false
+	}
+}
+
+// execQuantizedDenseHighway implements SIMD-accelerated fused quantized dense.
+// inputs layout: [x, packedWeights, scales, bias?]
+func execQuantizedDenseHighway(backend *simplego.Backend, node *simplego.Node, inputs []*simplego.Buffer, inputsOwned []bool) (*simplego.Buffer, error) {
+	quantFormat, groupSize, outFeatures, act := simplego.QuantizedDenseParams(node)
+
+	x := inputs[0]
+	w := inputs[1]
+	s := inputs[2]
+	var bias *simplego.Buffer
+	if len(inputs) > 3 {
+		bias = inputs[3]
+	}
+
+	if x.DType() != dtypes.Float32 {
+		return nil, errors.Errorf("highway QuantizedDense: only float32 input supported, got %s", x.DType())
+	}
+
+	output := simplego.FusedOpOutput(backend, node)
+	xData := x.Flat().([]float32)
+	scalesData := s.Flat().([]float32)
+	outData := output.Flat().([]float32)
+
+	K := x.Shape().Dimensions[x.Shape().Rank()-1]
+	N := outFeatures
+	M := x.Shape().Size() / K
+
+	var biasData []float32
+	if bias != nil {
+		biasData = bias.Flat().([]float32)
+	}
+
+	matmulAct, actSupported := backendToMatmulActivation(act)
+
+	switch quantFormat {
+	case backends.QuantNF4:
+		packed := w.Flat().([]uint8)
+		if actSupported && matmulAct != matmul.ActNone {
+			matmul.ParallelFusedNF4MatMulAct(xData, packed, scalesData, biasData, outData, M, K, N, groupSize, matmulAct)
+		} else {
+			matmul.ParallelFusedNF4MatMul(xData, packed, scalesData, biasData, outData, M, K, N, groupSize)
+			simplego.ApplyActivationFloat32(backend, outData, act)
+		}
+	case backends.QuantInt4:
+		packed := w.Flat().([]uint8)
+		if actSupported && matmulAct != matmul.ActNone {
+			matmul.ParallelFusedInt4MatMulAct(xData, packed, scalesData, biasData, outData, M, K, N, groupSize, matmulAct)
+		} else {
+			matmul.ParallelFusedInt4MatMul(xData, packed, scalesData, biasData, outData, M, K, N, groupSize)
+			simplego.ApplyActivationFloat32(backend, outData, act)
+		}
+	case backends.QuantInt8:
+		weights := w.Flat().([]int8)
+		matmul.ParallelFusedInt8MatMul(xData, weights, scalesData, biasData, outData, M, K, N, groupSize)
+		simplego.ApplyActivationFloat32(backend, outData, act)
+	default:
+		return nil, errors.Errorf("highway QuantizedDense: unknown quant format %d", quantFormat)
+	}
+
 	return output, nil
 }
 
