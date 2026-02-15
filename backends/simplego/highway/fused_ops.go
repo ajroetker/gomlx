@@ -521,23 +521,27 @@ func execQuantizedDenseHighway(backend *simplego.Backend, node *simplego.Node, i
 	case backends.QuantNF4:
 		packed := w.Flat().([]uint8)
 		if actSupported && matmulAct != matmul.ActNone {
-			matmul.ParallelFusedNF4MatMulAct(xData, packed, scalesData, biasData, outData, M, K, N, groupSize, matmulAct)
+			matmul.ParallelFusedNF4MatMulAct(hwyPool, xData, packed, scalesData, biasData, outData, M, K, N, groupSize, matmulAct)
 		} else {
-			matmul.ParallelFusedNF4MatMul(xData, packed, scalesData, biasData, outData, M, K, N, groupSize)
+			matmul.ParallelFusedNF4MatMul(hwyPool, xData, packed, scalesData, biasData, outData, M, K, N, groupSize)
 			simplego.ApplyActivationFloat32(backend, outData, act)
 		}
 	case backends.QuantInt4:
 		packed := w.Flat().([]uint8)
 		if actSupported && matmulAct != matmul.ActNone {
-			matmul.ParallelFusedInt4MatMulAct(xData, packed, scalesData, biasData, outData, M, K, N, groupSize, matmulAct)
+			matmul.ParallelFusedInt4MatMulAct(hwyPool, xData, packed, scalesData, biasData, outData, M, K, N, groupSize, matmulAct)
 		} else {
-			matmul.ParallelFusedInt4MatMul(xData, packed, scalesData, biasData, outData, M, K, N, groupSize)
+			matmul.ParallelFusedInt4MatMul(hwyPool, xData, packed, scalesData, biasData, outData, M, K, N, groupSize)
 			simplego.ApplyActivationFloat32(backend, outData, act)
 		}
 	case backends.QuantInt8:
 		weights := w.Flat().([]int8)
-		matmul.ParallelFusedInt8MatMul(xData, weights, scalesData, biasData, outData, M, K, N, groupSize)
-		simplego.ApplyActivationFloat32(backend, outData, act)
+		if actSupported && matmulAct != matmul.ActNone {
+			matmul.ParallelFusedInt8MatMulAct(hwyPool, xData, weights, scalesData, biasData, outData, M, K, N, groupSize, matmulAct)
+		} else {
+			matmul.ParallelFusedInt8MatMul(hwyPool, xData, weights, scalesData, biasData, outData, M, K, N, groupSize)
+			simplego.ApplyActivationFloat32(backend, outData, act)
+		}
 	default:
 		return nil, errors.Errorf("highway QuantizedDense: unknown quant format %d", quantFormat)
 	}

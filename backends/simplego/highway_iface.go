@@ -26,8 +26,7 @@ type HighwayMatMul interface {
 	MatMulDynamic(inputDType, outputDType dtypes.DType,
 		lhsFlat, rhsFlat any, batchSize,
 		lhsCrossSize, rhsCrossSize, contractingSize int, outputFlat any,
-		bufAllocAnyFn packgemm.BufAllocAnyFn, bufReleaseFn packgemm.BufReleaseFn,
-		pool *workerspool.Pool) error
+		bufAllocAnyFn packgemm.BufAllocAnyFn, bufReleaseFn packgemm.BufReleaseFn) error
 
 	// MatMulKLast performs batched matrix multiplication where both matrices have K as last dimension.
 	// C = A * B^T where:
@@ -38,8 +37,7 @@ type HighwayMatMul interface {
 	// because it avoids the need to transpose B.
 	MatMulKLast(inputDType, outputDType dtypes.DType,
 		lhsFlat, rhsFlat any, batchSize,
-		lhsCrossSize, rhsCrossSize, contractingSize int, outputFlat any,
-		pool *workerspool.Pool) error
+		lhsCrossSize, rhsCrossSize, contractingSize int, outputFlat any) error
 
 	// Transpose2D transposes an M×K row-major matrix to K×M using SIMD.
 	// Returns false if the dtype is not supported.
@@ -51,10 +49,26 @@ type HighwayMatMul interface {
 // Import the highway submodule to register the real implementation.
 var Highway HighwayMatMul = stubHighway{}
 
+// highwayRegistered tracks whether a real highway implementation has been registered.
+var highwayRegistered bool
+
+// SetPoolFn is a callback set by the highway subpackage to inject a unified
+// worker pool. When called with a workerspool.Pool, it wraps it as a
+// workerpool.Executor and replaces the highway-internal pool, eliminating
+// the duplicate thread overhead from two independent pools.
+var SetPoolFn func(pool *workerspool.Pool)
+
 // RegisterHighway registers a highway implementation.
 // This is called by the highway submodule's init() function.
 func RegisterHighway(impl HighwayMatMul) {
 	Highway = impl
+	highwayRegistered = true
+}
+
+// IsHighwayRegistered returns true if a real highway implementation has been registered.
+// This is used to disable the simplego worker pool when highway provides its own pool.
+func IsHighwayRegistered() bool {
+	return highwayRegistered
 }
 
 // stubHighway is the default implementation that reports no dtype support.
@@ -67,15 +81,13 @@ func (stubHighway) HasDTypeSupport(input, output dtypes.DType) bool {
 func (stubHighway) MatMulDynamic(inputDType, outputDType dtypes.DType,
 	lhsFlat, rhsFlat any, batchSize,
 	lhsCrossSize, rhsCrossSize, contractingSize int, outputFlat any,
-	bufAllocAnyFn packgemm.BufAllocAnyFn, bufReleaseFn packgemm.BufReleaseFn,
-	pool *workerspool.Pool) error {
+	bufAllocAnyFn packgemm.BufAllocAnyFn, bufReleaseFn packgemm.BufReleaseFn) error {
 	return errors.New("highway matmul not available: requires Go 1.26+ and importing the highway submodule")
 }
 
 func (stubHighway) MatMulKLast(inputDType, outputDType dtypes.DType,
 	lhsFlat, rhsFlat any, batchSize,
-	lhsCrossSize, rhsCrossSize, contractingSize int, outputFlat any,
-	pool *workerspool.Pool) error {
+	lhsCrossSize, rhsCrossSize, contractingSize int, outputFlat any) error {
 	return errors.New("highway matmul not available: requires Go 1.26+ and importing the highway submodule")
 }
 

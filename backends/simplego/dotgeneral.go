@@ -447,7 +447,7 @@ func execDotGeneral(backend *Backend, node *Node, inputs []*Buffer, _ []bool) (*
 				err = Highway.MatMulDynamic(inputDType, outputShape.DType, lhsRaw.flat, rhsRaw.flat,
 					params.batchSize, params.lhsCrossSize, params.rhsCrossSize, params.contractingSize,
 					output2.flat,
-					getAnyBufAllocator(backend, inputDType), getBufReleaser(backend), backend.workers)
+					getAnyBufAllocator(backend, inputDType), getBufReleaser(backend))
 				if err == nil {
 					err = dotGeneralCheckVersions(backend, lhs, rhs, params, output, output2)
 				}
@@ -506,7 +506,7 @@ func execDotGeneral(backend *Backend, node *Node, inputs []*Buffer, _ []bool) (*
 		if lhsNeedsTranspose == noTranspose && rhsNeedsTranspose == needs2DTranspose {
 			err = Highway.MatMulKLast(inputDType, outputDType, lhs.flat, rhs.flat,
 				params.batchSize, params.lhsCrossSize, params.rhsCrossSize, params.contractingSize,
-				output.flat, backend.workers)
+				output.flat)
 			return output, err
 		}
 
@@ -556,7 +556,7 @@ func execDotGeneral(backend *Backend, node *Node, inputs []*Buffer, _ []bool) (*
 		err = Highway.MatMulDynamic(inputDType, outputDType, lhsFlat, rhsFlat,
 			params.batchSize, params.lhsCrossSize, params.rhsCrossSize, params.contractingSize,
 			output.flat,
-			getAnyBufAllocator(backend, inputDType), getBufReleaser(backend), backend.workers)
+			getAnyBufAllocator(backend, inputDType), getBufReleaser(backend))
 
 		// Release temporary buffers
 		if lhsTransposed != nil {

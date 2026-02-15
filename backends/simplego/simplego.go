@@ -10,14 +10,13 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 
 	"github.com/gomlx/gomlx/backends"
 	"github.com/gomlx/gomlx/backends/notimplemented"
 	"github.com/gomlx/gomlx/internal/workerspool"
 	"github.com/pkg/errors"
-
-	"sync"
 )
 
 // Generates some trivial functions (binary and unary operators) automatically.
@@ -109,6 +108,12 @@ func New(config string) (backends.Backend, error) {
 func newDefaultBackend() *Backend {
 	b := &Backend{}
 	b.workers = workerspool.New()
+	// When highway is registered and provides a SetPoolFn callback, inject
+	// our workerspool.Pool as the single shared pool for both graph-level
+	// and intra-op parallelism, eliminating the duplicate thread overhead.
+	if IsHighwayRegistered() && SetPoolFn != nil {
+		SetPoolFn(b.workers)
+	}
 	return b
 }
 

@@ -40,7 +40,7 @@ func TestHighwayMatMul(t *testing.T) {
 		2,    // rhsCrossSize (N)
 		2,    // contractingSize (K)
 		output,
-		nil, nil, nil,
+		nil, nil,
 	)
 	require.NoError(t, err)
 
