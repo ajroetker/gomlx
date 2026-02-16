@@ -22,6 +22,7 @@ func init() {
 	simplego.SetNodeExecutor(backends.OpTypeFusedDense, simplego.RegisterPriorityArch, execDenseActivationHighway)
 	simplego.SetNodeExecutor(backends.OpTypeFusedScaledDotProductAttention, simplego.RegisterPriorityArch, execSDPAHighway)
 	simplego.SetNodeExecutor(backends.OpTypeFusedQuantizedDense, simplego.RegisterPriorityArch, execQuantizedDenseHighway)
+	simplego.SetNodeExecutor(backends.OpTypeFusedQuantizedScaledDotProductAttention, simplego.RegisterPriorityArch, execQuantizedSDPAHighway)
 	simplego.SetMultiOutputsNodeExecutor(backends.OpTypeFusedAttentionQKVProjection, simplego.RegisterPriorityArch, execQKVProjectionHighway)
 }
 
@@ -450,6 +451,86 @@ func execSDPAHighway(backend *simplego.Backend, node *simplego.Node, inputs []*s
 		)
 	default:
 		return nil, errors.Errorf("highway SDPA: unsupported dtype %s", q.DType())
+	}
+	return output, nil
+}
+
+// execQuantizedSDPAHighway implements SIMD-accelerated multi-head quantized SDPA.
+// Inputs are float32 Q/K/V; the go-highway kernel internally quantizes to uint8 for
+// int8×int8 matmuls (Q@K^T and attn@V), then dequantizes the output back to float32.
+func execQuantizedSDPAHighway(backend *simplego.Backend, node *simplego.Node, inputs []*simplego.Buffer, inputsOwned []bool) (*simplego.Buffer, error) {
+	numHeads, numKVHeads, axesLayout, scale, causal := simplego.QuantizedSDPAParams(node)
+
+	q := inputs[0]
+	k := inputs[1]
+	v := inputs[2]
+	var mask *simplego.Buffer
+	if len(inputs) > 3 {
+		mask = inputs[3]
+	}
+
+	if axesLayout == backends.AxesLayoutBSHD && mask != nil && mask.Shape().Rank() == 4 {
+		mask = simplego.TransposeBuffer(backend, mask, []int{0, 2, 1, 3})
+	}
+
+	output := simplego.FusedOpOutput(backend, node)
+
+	dims := q.Shape().Dimensions
+	batchSize := dims[0]
+	var seqLen, kvLen, headDim int
+	var qBatchStride, qHeadStride, qSeqStride int
+	var kvBatchStride, kvHeadStride, kvSeqStride int
+
+	if axesLayout == backends.AxesLayoutBSHD {
+		seqLen = dims[1]
+		headDim = dims[3]
+		kvDims := k.Shape().Dimensions
+		kvLen = kvDims[1]
+		qSeqStride = numHeads * headDim
+		kvSeqStride = numKVHeads * headDim
+		qHeadStride = headDim
+		kvHeadStride = headDim
+		qBatchStride = seqLen * numHeads * headDim
+		kvBatchStride = kvLen * numKVHeads * headDim
+	} else {
+		seqLen = dims[2]
+		headDim = dims[3]
+		kvDims := k.Shape().Dimensions
+		kvLen = kvDims[2]
+		qSeqStride = headDim
+		kvSeqStride = headDim
+		qHeadStride = seqLen * headDim
+		kvHeadStride = kvLen * headDim
+		qBatchStride = numHeads * seqLen * headDim
+		kvBatchStride = numKVHeads * kvLen * headDim
+	}
+
+	var maskBatchStride, maskHeadStride int
+	if mask != nil {
+		maskBatchStride, maskHeadStride = computeMaskStrides(mask.Shape().Dimensions)
+	}
+
+	switch q.DType() {
+	case dtypes.Float32:
+		var maskData []float32
+		if mask != nil {
+			if mask.Shape().DType == dtypes.Bool {
+				maskData = boolToAdditiveMask[float32](mask.Flat().([]bool))
+			} else {
+				maskData = mask.Flat().([]float32)
+			}
+		}
+		nn.MultiHeadQuantizedSDPAStrided(hwyPool,
+			q.Flat().([]float32), k.Flat().([]float32), v.Flat().([]float32),
+			maskData, output.Flat().([]float32),
+			batchSize, numHeads, numKVHeads, seqLen, kvLen, headDim,
+			qBatchStride, qHeadStride, qSeqStride,
+			kvBatchStride, kvHeadStride, kvSeqStride,
+			maskBatchStride, maskHeadStride,
+			float32(scale), causal,
+		)
+	default:
+		return nil, errors.Errorf("highway QuantizedSDPA: unsupported dtype %s (only float32 supported)", q.DType())
 	}
 	return output, nil
 }

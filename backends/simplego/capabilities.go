@@ -137,7 +137,8 @@ var Capabilities = backends.Capabilities{
 		backends.OpTypeFusedDense:         true,
 		backends.OpTypeFusedScaledDotProductAttention: true,
 		backends.OpTypeFusedAttentionQKVProjection: true,
-		backends.OpTypeFusedQuantizedDense:         true,
+		backends.OpTypeFusedQuantizedDense:                        true,
+		backends.OpTypeFusedQuantizedScaledDotProductAttention: true,
 
 		// TODO: not implemented yet:
 		// backends.OpTypePad: true,

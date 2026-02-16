@@ -67,6 +67,12 @@ func QKVProjectionOutputBuffers(backend *Backend, node *Node) (q, k, v *Buffer) 
 		backend.getBufferForShape(outShapes[2])
 }
 
+// QuantizedSDPAParams extracts the parameters from a FusedQuantizedScaledDotProductAttention node.
+func QuantizedSDPAParams(node *Node) (numHeads, numKVHeads int, axesLayout backends.AxesLayout, scale float64, causal bool) {
+	data := node.data.(*nodeFusedQuantizedScaledDotProductAttention)
+	return data.numHeads, data.numKVHeads, data.axesLayout, data.scale, data.causal
+}
+
 // QuantizedDenseParams extracts the parameters from a FusedQuantizedDense node.
 func QuantizedDenseParams(node *Node) (quantFormat backends.QuantFormat, groupSize int, outFeatures int, activation backends.ActivationType) {
 	data := node.data.(*nodeFusedQuantizedDense)

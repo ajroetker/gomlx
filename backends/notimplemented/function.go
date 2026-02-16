@@ -91,10 +91,6 @@ func (f Function) FusedAttentionQKVProjection(x, wQKV, biasQ, biasK, biasV backe
 	return nil, nil, nil, f.baseErrFn(backends.OpTypeFusedAttentionQKVProjection)
 }
 
-func (f Function) FusedQuantizedDense(x, packedWeights, scales, bias backends.Value, quantFormat backends.QuantFormat, groupSize int, outFeatures int, activation backends.ActivationType) (backends.Value, error) {
-	return nil, f.baseErrFn(backends.OpTypeFusedQuantizedDense)
-}
-
 func (f Function) Sort(comparator backends.Function, axis int, isStable bool, inputs ...backends.Value) (
 	[]backends.Value, error) {
 	return nil, f.baseErrFn(backends.OpTypeSort)

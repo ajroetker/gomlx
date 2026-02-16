@@ -77,6 +77,20 @@ type nodeFusedAttentionQKVProjection struct {
 	hasBiasV bool
 }
 
+type nodeFusedQuantizedScaledDotProductAttention struct {
+	numHeads   int
+	numKVHeads int
+	axesLayout backends.AxesLayout
+	scale      float64
+	causal     bool
+}
+
+func (d *nodeFusedQuantizedScaledDotProductAttention) EqualNodeData(other nodeDataComparable) bool {
+	o := other.(*nodeFusedQuantizedScaledDotProductAttention)
+	return d.numHeads == o.numHeads && d.numKVHeads == o.numKVHeads &&
+		d.axesLayout == o.axesLayout && d.scale == o.scale && d.causal == o.causal
+}
+
 type nodeFusedQuantizedDense struct {
 	quantFormat backends.QuantFormat
 	groupSize   int
@@ -236,6 +250,31 @@ func (f *Function) FusedScaledDotProductAttention(query, key, value, mask backen
 	// Output shape is the same as query.
 	data := &nodeFusedScaledDotProductAttention{numHeads: numHeads, numKVHeads: numKVHeads, axesLayout: axesLayout, scale: scale, causal: causal}
 	node, _ := f.getOrCreateNode(backends.OpTypeFusedScaledDotProductAttention, qNode.shape.Clone(), inputs, data)
+	return node, nil
+}
+
+// FusedQuantizedScaledDotProductAttention computes multi-head SDPA using int8×int8
+// matmuls for Q@K^T and attn@V. Inputs are float32; quantization is internal.
+func (f *Function) FusedQuantizedScaledDotProductAttention(query, key, value, mask backends.Value, numHeads, numKVHeads int, axesLayout backends.AxesLayout, scale float64, causal bool) (backends.Value, error) {
+	values := []backends.Value{query, key, value}
+	if mask != nil {
+		values = append(values, mask)
+	}
+	inputs, err := f.verifyAndCastValues("FusedQuantizedScaledDotProductAttention", values...)
+	if err != nil {
+		return nil, err
+	}
+	qNode := inputs[0]
+
+	if qNode.shape.Rank() != 4 {
+		return nil, errors.Errorf("FusedQuantizedScaledDotProductAttention: query must have rank 4, got %d", qNode.shape.Rank())
+	}
+	if numHeads <= 0 || numKVHeads <= 0 || numHeads%numKVHeads != 0 {
+		return nil, errors.Errorf("FusedQuantizedScaledDotProductAttention: numHeads (%d) must be positive and divisible by numKVHeads (%d)", numHeads, numKVHeads)
+	}
+
+	data := &nodeFusedQuantizedScaledDotProductAttention{numHeads: numHeads, numKVHeads: numKVHeads, axesLayout: axesLayout, scale: scale, causal: causal}
+	node, _ := f.getOrCreateNode(backends.OpTypeFusedQuantizedScaledDotProductAttention, qNode.shape.Clone(), inputs, data)
 	return node, nil
 }
 

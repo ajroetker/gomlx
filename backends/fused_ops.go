@@ -204,6 +204,16 @@ type FusedOps interface {
 		quantFormat QuantFormat, groupSize int, outFeatures int,
 		activation ActivationType) (Value, error)
 
+	// FusedQuantizedScaledDotProductAttention computes multi-head SDPA using int8×int8
+	// matmuls for Q@K^T and attn@V. Inputs are float32; quantization is internal.
+	// Same interface as FusedScaledDotProductAttention.
+	FusedQuantizedScaledDotProductAttention(
+		query, key, value, mask Value,
+		numHeads, numKVHeads int,
+		axesLayout AxesLayout,
+		scale float64,
+		causal bool) (Value, error)
+
 	// FusedAttentionQKVProjection performs fused Query-Key-Value projection: a single large matmul
 	// merged with a scatter into separate query (Q), key (K), value (V) outputs with optional
 	// per-projection bias.

@@ -19,6 +19,7 @@ func init() {
 	setNodeExecutor(backends.OpTypeFusedDense, priorityTyped, execFusedDense)
 	setNodeExecutor(backends.OpTypeFusedScaledDotProductAttention, priorityTyped, execFusedScaledDotProductAttention)
 	setNodeExecutor(backends.OpTypeFusedQuantizedDense, priorityTyped, execFusedQuantizedDense)
+	setNodeExecutor(backends.OpTypeFusedQuantizedScaledDotProductAttention, priorityTyped, execFusedQuantizedScaledDotProductAttention)
 	multiOutputsNodeExecutors[backends.OpTypeFusedAttentionQKVProjection] = execFusedAttentionQKVProjection
 }
 
@@ -700,6 +701,54 @@ func sdpaMultiHeadGeneric[T float32 | float64](query, key, value, mask, output *
 			)
 		}
 	}
+}
+
+// FusedQuantizedScaledDotProductAttention ======================================================================
+
+// execFusedQuantizedScaledDotProductAttention implements quantized SDPA as a scalar fallback.
+// Inputs are float32 Q/K/V; quantization to int8 is an optimization done by the highway
+// executor. The scalar fallback simply delegates to the float SDPA implementation.
+func execFusedQuantizedScaledDotProductAttention(backend *Backend, node *Node, inputs []*Buffer, inputsOwned []bool) (
+	*Buffer, error) {
+	data := node.data.(*nodeFusedQuantizedScaledDotProductAttention)
+	query := inputs[0]
+	key := inputs[1]
+	value := inputs[2]
+	var mask *Buffer
+	if len(inputs) > 3 {
+		mask = inputs[3]
+	}
+
+	if data.axesLayout == backends.AxesLayoutBSHD && mask != nil && mask.shape.Rank() == 4 {
+		mask = transposeBuffer(backend, mask, []int{0, 2, 1, 3})
+	}
+
+	output := backend.getBufferForShape(query.shape.Clone())
+
+	var maskBatchStride, maskHeadStride int
+	if mask != nil {
+		maskBatchStride, maskHeadStride = sdpaComputeMaskStrides(mask.shape.Dimensions)
+	}
+
+	// Reuse the float SDPA node data for the generic kernel.
+	floatData := &nodeFusedScaledDotProductAttention{
+		numHeads:   data.numHeads,
+		numKVHeads: data.numKVHeads,
+		axesLayout: data.axesLayout,
+		scale:      data.scale,
+		causal:     data.causal,
+	}
+
+	switch query.shape.DType {
+	case dtypes.Float32:
+		sdpaMultiHeadGeneric[float32](query, key, value, mask, output, floatData, maskBatchStride, maskHeadStride)
+	case dtypes.Float64:
+		sdpaMultiHeadGeneric[float64](query, key, value, mask, output, floatData, maskBatchStride, maskHeadStride)
+	default:
+		return nil, errors.Errorf("FusedQuantizedScaledDotProductAttention: unsupported dtype %s", query.shape.DType)
+	}
+
+	return output, nil
 }
 
 // FusedAttentionQKVProjection ===================================================================================
