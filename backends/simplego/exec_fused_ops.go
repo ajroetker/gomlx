@@ -703,105 +703,6 @@ func sdpaMultiHeadGeneric[T float32 | float64](query, key, value, mask, output *
 	}
 }
 
-// FusedQuantizedScaledDotProductAttention ======================================================================
-
-// execFusedQuantizedScaledDotProductAttention implements quantized SDPA as a scalar fallback.
-// Inputs are float32 Q/K/V; quantization to int8 is an optimization done by the highway
-// executor. The scalar fallback simply delegates to the float SDPA implementation.
-func execFusedQuantizedScaledDotProductAttention(backend *Backend, node *Node, inputs []*Buffer, inputsOwned []bool) (
-	*Buffer, error) {
-	data := node.data.(*nodeFusedQuantizedScaledDotProductAttention)
-	query := inputs[0]
-	key := inputs[1]
-	value := inputs[2]
-	var mask *Buffer
-	if len(inputs) > 3 {
-		mask = inputs[3]
-	}
-
-	if data.axesLayout == backends.AxesLayoutBSHD && mask != nil && mask.shape.Rank() == 4 {
-		mask = transposeBuffer(backend, mask, []int{0, 2, 1, 3})
-	}
-
-	output := backend.getBufferForShape(query.shape.Clone())
-
-	var maskBatchStride, maskHeadStride int
-	if mask != nil {
-		maskBatchStride, maskHeadStride = sdpaComputeMaskStrides(mask.shape.Dimensions)
-	}
-
-	// Reuse the float SDPA node data for the generic kernel.
-	floatData := &nodeFusedScaledDotProductAttention{
-		numHeads:   data.numHeads,
-		numKVHeads: data.numKVHeads,
-		axesLayout: data.axesLayout,
-		scale:      data.scale,
-		causal:     data.causal,
-	}
-
-	switch query.shape.DType {
-	case dtypes.Float32:
-		sdpaMultiHeadGeneric[float32](query, key, value, mask, output, floatData, maskBatchStride, maskHeadStride)
-	case dtypes.Float64:
-		sdpaMultiHeadGeneric[float64](query, key, value, mask, output, floatData, maskBatchStride, maskHeadStride)
-	default:
-		return nil, errors.Errorf("FusedQuantizedScaledDotProductAttention: unsupported dtype %s", query.shape.DType)
-	}
-
-	return output, nil
-}
-
-// FusedAttentionQKVProjection ===================================================================================
-
-// execFusedAttentionQKVProjection implements fused QKV projection.
-// inputs[0]: pre-computed DotGeneral result [batch, qDim+2*kvDim]
-// inputs[1..]: biasQ, biasK, biasV (optional, determined by node data flags)
-// outputs: q [batch, qDim], k [batch, kvDim], v [batch, kvDim]
-//
-// The matmul (x @ wQKV) is already computed by the DotGeneral sub-node.
-// This executor just splits the combined result into Q/K/V and adds biases.
-func execFusedAttentionQKVProjection(backend *Backend, node *Node, inputs []*Buffer, inputsOwned []bool) ([]*Buffer, error) {
-	data := node.data.(*nodeFusedAttentionQKVProjection)
-	combined := inputs[0] // DotGeneral result: [batch, qDim+2*kvDim]
-	// inputs[1] = x, inputs[2] = wQKV (included for highway executor, unused here).
-
-	// Determine bias buffers using flags from node data, not positional indexing.
-	var biasQ, biasK, biasV *Buffer
-	biasIdx := 3
-	if data.hasBiasQ {
-		biasQ = inputs[biasIdx]
-		biasIdx++
-	}
-	if data.hasBiasK {
-		biasK = inputs[biasIdx]
-		biasIdx++
-	}
-	if data.hasBiasV {
-		biasV = inputs[biasIdx]
-	}
-
-	qShape := node.multiOutputsShapes[0]
-	kShape := node.multiOutputsShapes[1]
-	vShape := node.multiOutputsShapes[2]
-	qBuf := backend.getBufferForShape(qShape)
-	kBuf := backend.getBufferForShape(kShape)
-	vBuf := backend.getBufferForShape(vShape)
-
-	qDim := data.qDim
-	kvDim := data.kvDim
-
-	switch combined.shape.DType {
-	case dtypes.Float32:
-		qkvSplitBiasGeneric[float32](combined, biasQ, biasK, biasV, qBuf, kBuf, vBuf, qDim, kvDim)
-	case dtypes.Float64:
-		qkvSplitBiasGeneric[float64](combined, biasQ, biasK, biasV, qBuf, kBuf, vBuf, qDim, kvDim)
-	default:
-		return nil, errors.Errorf("FusedAttentionQKVProjection: unsupported dtype %s", combined.shape.DType)
-	}
-
-	return []*Buffer{qBuf, kBuf, vBuf}, nil
-}
-
 // FusedQuantizedDense =============================================================================================
 
 // nf4LookupTable contains the 16 fixed QLoRA NF4 values.
@@ -943,6 +844,106 @@ func quantizedDenseInt8(x []float32, weights []int8, scales []float32, bias []fl
 			out[m*N+n] = sum
 		}
 	}
+}
+
+
+// FusedQuantizedScaledDotProductAttention ======================================================================
+
+// execFusedQuantizedScaledDotProductAttention implements quantized SDPA as a scalar fallback.
+// Inputs are float32 Q/K/V; quantization to int8 is an optimization done by the highway
+// executor. The scalar fallback simply delegates to the float SDPA implementation.
+func execFusedQuantizedScaledDotProductAttention(backend *Backend, node *Node, inputs []*Buffer, inputsOwned []bool) (
+	*Buffer, error) {
+	data := node.data.(*nodeFusedQuantizedScaledDotProductAttention)
+	query := inputs[0]
+	key := inputs[1]
+	value := inputs[2]
+	var mask *Buffer
+	if len(inputs) > 3 {
+		mask = inputs[3]
+	}
+
+	if data.axesLayout == backends.AxesLayoutBSHD && mask != nil && mask.shape.Rank() == 4 {
+		mask = transposeBuffer(backend, mask, []int{0, 2, 1, 3})
+	}
+
+	output := backend.getBufferForShape(query.shape.Clone())
+
+	var maskBatchStride, maskHeadStride int
+	if mask != nil {
+		maskBatchStride, maskHeadStride = sdpaComputeMaskStrides(mask.shape.Dimensions)
+	}
+
+	// Reuse the float SDPA node data for the generic kernel.
+	floatData := &nodeFusedScaledDotProductAttention{
+		numHeads:   data.numHeads,
+		numKVHeads: data.numKVHeads,
+		axesLayout: data.axesLayout,
+		scale:      data.scale,
+		causal:     data.causal,
+	}
+
+	switch query.shape.DType {
+	case dtypes.Float32:
+		sdpaMultiHeadGeneric[float32](query, key, value, mask, output, floatData, maskBatchStride, maskHeadStride)
+	case dtypes.Float64:
+		sdpaMultiHeadGeneric[float64](query, key, value, mask, output, floatData, maskBatchStride, maskHeadStride)
+	default:
+		return nil, errors.Errorf("FusedQuantizedScaledDotProductAttention: unsupported dtype %s", query.shape.DType)
+	}
+
+	return output, nil
+}
+
+// FusedAttentionQKVProjection ===================================================================================
+
+// execFusedAttentionQKVProjection implements fused QKV projection.
+// inputs[0]: pre-computed DotGeneral result [batch, qDim+2*kvDim]
+// inputs[1..]: biasQ, biasK, biasV (optional, determined by node data flags)
+// outputs: q [batch, qDim], k [batch, kvDim], v [batch, kvDim]
+//
+// The matmul (x @ wQKV) is already computed by the DotGeneral sub-node.
+// This executor just splits the combined result into Q/K/V and adds biases.
+func execFusedAttentionQKVProjection(backend *Backend, node *Node, inputs []*Buffer, inputsOwned []bool) ([]*Buffer, error) {
+	data := node.data.(*nodeFusedAttentionQKVProjection)
+	combined := inputs[0] // DotGeneral result: [batch, qDim+2*kvDim]
+	// inputs[1] = x, inputs[2] = wQKV (included for highway executor, unused here).
+
+	// Determine bias buffers using flags from node data, not positional indexing.
+	var biasQ, biasK, biasV *Buffer
+	biasIdx := 3
+	if data.hasBiasQ {
+		biasQ = inputs[biasIdx]
+		biasIdx++
+	}
+	if data.hasBiasK {
+		biasK = inputs[biasIdx]
+		biasIdx++
+	}
+	if data.hasBiasV {
+		biasV = inputs[biasIdx]
+	}
+
+	qShape := node.multiOutputsShapes[0]
+	kShape := node.multiOutputsShapes[1]
+	vShape := node.multiOutputsShapes[2]
+	qBuf := backend.getBufferForShape(qShape)
+	kBuf := backend.getBufferForShape(kShape)
+	vBuf := backend.getBufferForShape(vShape)
+
+	qDim := data.qDim
+	kvDim := data.kvDim
+
+	switch combined.shape.DType {
+	case dtypes.Float32:
+		qkvSplitBiasGeneric[float32](combined, biasQ, biasK, biasV, qBuf, kBuf, vBuf, qDim, kvDim)
+	case dtypes.Float64:
+		qkvSplitBiasGeneric[float64](combined, biasQ, biasK, biasV, qBuf, kBuf, vBuf, qDim, kvDim)
+	default:
+		return nil, errors.Errorf("FusedAttentionQKVProjection: unsupported dtype %s", combined.shape.DType)
+	}
+
+	return []*Buffer{qBuf, kBuf, vBuf}, nil
 }
 
 // qkvSplitBiasGeneric splits the pre-computed matmul result [batch, totalOut] into

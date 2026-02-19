@@ -284,7 +284,7 @@ func BenchmarkDense(b *testing.B) {
 				bias := params[2]
 
 				// x @ weight via DotGeneral: contract x's axis 1 with weight's axis 0.
-				y := benchMust(f.DotGeneral(x, []int{1}, nil, weight, []int{0}, nil))
+				y := benchMust(f.DotGeneral(x, []int{1}, nil, weight, []int{0}, nil, backends.DotGeneralConfig{}))
 
 				// Add bias: broadcast [outFeatures] -> [batch, outFeatures].
 				biasBroadcast := benchMust(f.BroadcastInDim(bias, outShape, []int{1}))
@@ -412,7 +412,7 @@ func BenchmarkQuantizedDense(b *testing.B) {
 				wDequant := benchMust(f.Mul(wFloat, expandedScales))
 
 				// Matmul: x [M, K] @ wDequant [K, N] → [M, N].
-				y := benchMust(f.DotGeneral(x, []int{1}, nil, wDequant, []int{0}, nil))
+				y := benchMust(f.DotGeneral(x, []int{1}, nil, wDequant, []int{0}, nil, backends.DotGeneralConfig{}))
 
 				// Add bias.
 				biasBroadcast := benchMust(f.BroadcastInDim(bias, outShape, []int{1}))

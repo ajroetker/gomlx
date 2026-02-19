@@ -77,6 +77,19 @@ type nodeFusedAttentionQKVProjection struct {
 	hasBiasV bool
 }
 
+type nodeFusedQuantizedDense struct {
+	quantFormat backends.QuantFormat
+	groupSize   int
+	outFeatures int
+	activation  backends.ActivationType
+}
+
+func (d *nodeFusedQuantizedDense) EqualNodeData(other nodeDataComparable) bool {
+	o := other.(*nodeFusedQuantizedDense)
+	return d.quantFormat == o.quantFormat && d.groupSize == o.groupSize &&
+		d.outFeatures == o.outFeatures && d.activation == o.activation
+}
+
 type nodeFusedQuantizedScaledDotProductAttention struct {
 	numHeads   int
 	numKVHeads int
@@ -89,19 +102,6 @@ func (d *nodeFusedQuantizedScaledDotProductAttention) EqualNodeData(other nodeDa
 	o := other.(*nodeFusedQuantizedScaledDotProductAttention)
 	return d.numHeads == o.numHeads && d.numKVHeads == o.numKVHeads &&
 		d.axesLayout == o.axesLayout && d.scale == o.scale && d.causal == o.causal
-}
-
-type nodeFusedQuantizedDense struct {
-	quantFormat backends.QuantFormat
-	groupSize   int
-	outFeatures int
-	activation  backends.ActivationType
-}
-
-func (d *nodeFusedQuantizedDense) EqualNodeData(other nodeDataComparable) bool {
-	o := other.(*nodeFusedQuantizedDense)
-	return d.quantFormat == o.quantFormat && d.groupSize == o.groupSize &&
-		d.outFeatures == o.outFeatures && d.activation == o.activation
 }
 
 // FusedSoftmax computes softmax along the specified axis.
@@ -205,7 +205,7 @@ func (f *Function) FusedDense(x, weight, bias backends.Value, activation backend
 	outShape := shapes.Make(xNode.shape.DType, outDims...)
 
 	// Build DotGeneral sub-node for the matmul: contract x's last axis with weight's first.
-	dotResult, err := f.DotGeneral(xNode, []int{xNode.shape.Rank() - 1}, nil, wNode, []int{0}, nil)
+	dotResult, err := f.DotGeneral(xNode, []int{xNode.shape.Rank() - 1}, nil, wNode, []int{0}, nil, backends.DotGeneralConfig{})
 	if err != nil {
 		return nil, errors.WithMessagef(err, "FusedDense: DotGeneral")
 	}
@@ -251,107 +251,6 @@ func (f *Function) FusedScaledDotProductAttention(query, key, value, mask backen
 	data := &nodeFusedScaledDotProductAttention{numHeads: numHeads, numKVHeads: numKVHeads, axesLayout: axesLayout, scale: scale, causal: causal}
 	node, _ := f.getOrCreateNode(backends.OpTypeFusedScaledDotProductAttention, qNode.shape.Clone(), inputs, data)
 	return node, nil
-}
-
-// FusedQuantizedScaledDotProductAttention computes multi-head SDPA using int8×int8
-// matmuls for Q@K^T and attn@V. Inputs are float32; quantization is internal.
-func (f *Function) FusedQuantizedScaledDotProductAttention(query, key, value, mask backends.Value, numHeads, numKVHeads int, axesLayout backends.AxesLayout, scale float64, causal bool) (backends.Value, error) {
-	values := []backends.Value{query, key, value}
-	if mask != nil {
-		values = append(values, mask)
-	}
-	inputs, err := f.verifyAndCastValues("FusedQuantizedScaledDotProductAttention", values...)
-	if err != nil {
-		return nil, err
-	}
-	qNode := inputs[0]
-
-	if qNode.shape.Rank() != 4 {
-		return nil, errors.Errorf("FusedQuantizedScaledDotProductAttention: query must have rank 4, got %d", qNode.shape.Rank())
-	}
-	if numHeads <= 0 || numKVHeads <= 0 || numHeads%numKVHeads != 0 {
-		return nil, errors.Errorf("FusedQuantizedScaledDotProductAttention: numHeads (%d) must be positive and divisible by numKVHeads (%d)", numHeads, numKVHeads)
-	}
-
-	data := &nodeFusedQuantizedScaledDotProductAttention{numHeads: numHeads, numKVHeads: numKVHeads, axesLayout: axesLayout, scale: scale, causal: causal}
-	node, _ := f.getOrCreateNode(backends.OpTypeFusedQuantizedScaledDotProductAttention, qNode.shape.Clone(), inputs, data)
-	return node, nil
-}
-
-// FusedAttentionQKVProjection performs fused Query-Key-Value projection.
-//
-// The matmul (x @ wQKV) is delegated to DotGeneral, which selects the optimal
-// execution path (blocked, packgemm, highway, etc.) at build time. The fused
-// executor then splits the result into Q/K/V and adds biases.
-func (f *Function) FusedAttentionQKVProjection(x, wQKV, biasQ, biasK, biasV backends.Value, queryDim, keyValueDim int) (queryOut, keyOut, valueOut backends.Value, err error) {
-	values := []backends.Value{x, wQKV}
-	if biasQ != nil {
-		values = append(values, biasQ)
-	}
-	if biasK != nil {
-		values = append(values, biasK)
-	}
-	if biasV != nil {
-		values = append(values, biasV)
-	}
-	inputs, err := f.verifyAndCastValues("AttentionQKVProjection", values...)
-	if err != nil {
-		return nil, nil, nil, err
-	}
-	xNode := inputs[0]
-	wNode := inputs[1]
-
-	if xNode.shape.Rank() < 1 {
-		return nil, nil, nil, errors.Errorf("AttentionQKVProjection: x must have rank >= 1, got %d", xNode.shape.Rank())
-	}
-
-	batchDims := xNode.shape.Dimensions[:xNode.shape.Rank()-1]
-	qDims := make([]int, len(batchDims)+1)
-	copy(qDims, batchDims)
-	qDims[len(batchDims)] = queryDim
-	kvDims := make([]int, len(batchDims)+1)
-	copy(kvDims, batchDims)
-	kvDims[len(batchDims)] = keyValueDim
-
-	qShape := shapes.Make(xNode.shape.DType, qDims...)
-	kShape := shapes.Make(xNode.shape.DType, kvDims...)
-	vShape := shapes.Make(xNode.shape.DType, kvDims...)
-
-	// Build DotGeneral sub-node for the matmul: x @ wQKV.
-	// This delegates to the optimized matmul infrastructure (blocked, packgemm, highway, etc.).
-	dotResult, dotErr := f.DotGeneral(xNode, []int{xNode.shape.Rank() - 1}, nil, wNode, []int{0}, nil)
-	if dotErr != nil {
-		return nil, nil, nil, errors.WithMessagef(dotErr, "FusedAttentionQKVProjection: DotGeneral")
-	}
-	dotNode := dotResult.(*Node)
-
-	// FusedAttentionQKVProjection inputs: [dotResult, x, wQKV, biasQ?, biasK?, biasV?].
-	// The matmul is already computed by the DotGeneral sub-node (inputs[0]).
-	// x and wQKV are included so that SIMD-accelerated executors (highway) can
-	// redo the fused matmul+split+bias from scratch.
-	fusedInputs := []*Node{dotNode, xNode, wNode}
-	if biasQ != nil {
-		fusedInputs = append(fusedInputs, inputs[2])
-	}
-	biasIdx := 2
-	if biasQ != nil {
-		biasIdx++
-	}
-	if biasK != nil {
-		fusedInputs = append(fusedInputs, inputs[biasIdx])
-		biasIdx++
-	}
-	if biasV != nil {
-		fusedInputs = append(fusedInputs, inputs[biasIdx])
-	}
-
-	data := &nodeFusedAttentionQKVProjection{qDim: queryDim, kvDim: keyValueDim, hasBiasQ: biasQ != nil, hasBiasK: biasK != nil, hasBiasV: biasV != nil}
-	node := f.newMultiOutputsNode(backends.OpTypeFusedAttentionQKVProjection, []shapes.Shape{qShape, kShape, vShape}, fusedInputs...)
-	node.data = data
-	queryOut = node.multiOutputsNodes[0]
-	keyOut = node.multiOutputsNodes[1]
-	valueOut = node.multiOutputsNodes[2]
-	return
 }
 
 // FusedQuantizedDense performs fused dequantization + matmul + optional bias + optional activation.
@@ -422,4 +321,106 @@ func (f *Function) FusedQuantizedDense(x, packedWeights, scales, bias backends.V
 	}
 	node, _ := f.getOrCreateNode(backends.OpTypeFusedQuantizedDense, outShape, inputs, data)
 	return node, nil
+}
+
+
+// FusedQuantizedScaledDotProductAttention computes multi-head SDPA using int8×int8
+// matmuls for Q@K^T and attn@V. Inputs are float32; quantization is internal.
+func (f *Function) FusedQuantizedScaledDotProductAttention(query, key, value, mask backends.Value, numHeads, numKVHeads int, axesLayout backends.AxesLayout, scale float64, causal bool) (backends.Value, error) {
+	values := []backends.Value{query, key, value}
+	if mask != nil {
+		values = append(values, mask)
+	}
+	inputs, err := f.verifyAndCastValues("FusedQuantizedScaledDotProductAttention", values...)
+	if err != nil {
+		return nil, err
+	}
+	qNode := inputs[0]
+
+	if qNode.shape.Rank() != 4 {
+		return nil, errors.Errorf("FusedQuantizedScaledDotProductAttention: query must have rank 4, got %d", qNode.shape.Rank())
+	}
+	if numHeads <= 0 || numKVHeads <= 0 || numHeads%numKVHeads != 0 {
+		return nil, errors.Errorf("FusedQuantizedScaledDotProductAttention: numHeads (%d) must be positive and divisible by numKVHeads (%d)", numHeads, numKVHeads)
+	}
+
+	data := &nodeFusedQuantizedScaledDotProductAttention{numHeads: numHeads, numKVHeads: numKVHeads, axesLayout: axesLayout, scale: scale, causal: causal}
+	node, _ := f.getOrCreateNode(backends.OpTypeFusedQuantizedScaledDotProductAttention, qNode.shape.Clone(), inputs, data)
+	return node, nil
+}
+
+// FusedAttentionQKVProjection performs fused Query-Key-Value projection.
+//
+// The matmul (x @ wQKV) is delegated to DotGeneral, which selects the optimal
+// execution path (blocked, packgemm, highway, etc.) at build time. The fused
+// executor then splits the result into Q/K/V and adds biases.
+func (f *Function) FusedAttentionQKVProjection(x, wQKV, biasQ, biasK, biasV backends.Value, queryDim, keyValueDim int) (queryOut, keyOut, valueOut backends.Value, err error) {
+	values := []backends.Value{x, wQKV}
+	if biasQ != nil {
+		values = append(values, biasQ)
+	}
+	if biasK != nil {
+		values = append(values, biasK)
+	}
+	if biasV != nil {
+		values = append(values, biasV)
+	}
+	inputs, err := f.verifyAndCastValues("AttentionQKVProjection", values...)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	xNode := inputs[0]
+	wNode := inputs[1]
+
+	if xNode.shape.Rank() < 1 {
+		return nil, nil, nil, errors.Errorf("AttentionQKVProjection: x must have rank >= 1, got %d", xNode.shape.Rank())
+	}
+
+	batchDims := xNode.shape.Dimensions[:xNode.shape.Rank()-1]
+	qDims := make([]int, len(batchDims)+1)
+	copy(qDims, batchDims)
+	qDims[len(batchDims)] = queryDim
+	kvDims := make([]int, len(batchDims)+1)
+	copy(kvDims, batchDims)
+	kvDims[len(batchDims)] = keyValueDim
+
+	qShape := shapes.Make(xNode.shape.DType, qDims...)
+	kShape := shapes.Make(xNode.shape.DType, kvDims...)
+	vShape := shapes.Make(xNode.shape.DType, kvDims...)
+
+	// Build DotGeneral sub-node for the matmul: x @ wQKV.
+	// This delegates to the optimized matmul infrastructure (blocked, packgemm, highway, etc.).
+	dotResult, dotErr := f.DotGeneral(xNode, []int{xNode.shape.Rank() - 1}, nil, wNode, []int{0}, nil, backends.DotGeneralConfig{})
+	if dotErr != nil {
+		return nil, nil, nil, errors.WithMessagef(dotErr, "FusedAttentionQKVProjection: DotGeneral")
+	}
+	dotNode := dotResult.(*Node)
+
+	// FusedAttentionQKVProjection inputs: [dotResult, x, wQKV, biasQ?, biasK?, biasV?].
+	// The matmul is already computed by the DotGeneral sub-node (inputs[0]).
+	// x and wQKV are included so that SIMD-accelerated executors (highway) can
+	// redo the fused matmul+split+bias from scratch.
+	fusedInputs := []*Node{dotNode, xNode, wNode}
+	if biasQ != nil {
+		fusedInputs = append(fusedInputs, inputs[2])
+	}
+	biasIdx := 2
+	if biasQ != nil {
+		biasIdx++
+	}
+	if biasK != nil {
+		fusedInputs = append(fusedInputs, inputs[biasIdx])
+		biasIdx++
+	}
+	if biasV != nil {
+		fusedInputs = append(fusedInputs, inputs[biasIdx])
+	}
+
+	data := &nodeFusedAttentionQKVProjection{qDim: queryDim, kvDim: keyValueDim, hasBiasQ: biasQ != nil, hasBiasK: biasK != nil, hasBiasV: biasV != nil}
+	node := f.newMultiOutputsNode(backends.OpTypeFusedAttentionQKVProjection, []shapes.Shape{qShape, kShape, vShape}, fusedInputs...)
+	node.data = data
+	queryOut = node.multiOutputsNodes[0]
+	keyOut = node.multiOutputsNodes[1]
+	valueOut = node.multiOutputsNodes[2]
+	return
 }

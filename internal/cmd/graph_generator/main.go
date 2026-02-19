@@ -52,7 +52,7 @@ var (
 		// Fused ops: exported wrappers with "Internal:" comments are hand-written in fused_ops.go.
 		"FusedDense", "FusedGelu", "FusedLayerNorm", "FusedSoftmax",
 		"FusedScaledDotProductAttention", "FusedAttentionQKVProjection",
-		"FusedQuantizedDense")
+		"FusedQuantizedDense", "FusedQuantizedScaledDotProductAttention")
 
 	// methodsNotGenerated get a NodeType but no auto-generated wrapper
 	// (hand-written implementations).
@@ -67,6 +67,7 @@ var (
 		"FusedScaledDotProductAttention.mask",
 		"FusedAttentionQKVProjection.biasQ", "FusedAttentionQKVProjection.biasK", "FusedAttentionQKVProjection.biasV",
 		"FusedQuantizedDense.bias",
+		"FusedQuantizedScaledDotProductAttention.mask",
 	)
 
 	// methodsExcluded from generating and even from having a NodeType.
@@ -177,6 +178,9 @@ func buildMethodInfo() (methods []*MethodInfo) {
 			case "QuantFormat":
 				pi.BackendType = "backends." + pi.BackendType
 				pi.Format = "%s"
+			case "DotGeneralConfig":
+				pi.BackendType = "backends." + pi.BackendType
+				pi.Format = "%+v"
 			default:
 				switch {
 				case strings.HasPrefix(pi.BackendType, "..."):
