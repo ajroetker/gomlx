@@ -86,6 +86,7 @@ const (
 	ActivationGelu
 	ActivationRelu
 	ActivationSilu
+	ActivationHardSwish
 	ActivationTanh
 )
 
@@ -100,6 +101,8 @@ func (a ActivationType) String() string {
 		return "relu"
 	case ActivationSilu:
 		return "silu"
+	case ActivationHardSwish:
+		return "hard_swish"
 	case ActivationTanh:
 		return "tanh"
 	default:
