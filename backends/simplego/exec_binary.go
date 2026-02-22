@@ -13,8 +13,8 @@ import (
 // One optimization supported is specially handling the cases where one of the operands is a scalar (or of size 1),
 // in which case it becomes almost a unary operation with a constant value.
 
-// binaryOperandsAndOutput is a convenience function to get the inputs and output -- which may be the reuse of the input.
-func binaryOperandsAndOutput(backend *Backend, inputs []*Buffer, inputsOwned []bool, outputShape shapes.Shape) (
+// BinaryOperandsAndOutput is a convenience function to get the inputs and output -- which may be the reuse of the input.
+func BinaryOperandsAndOutput(backend *Backend, inputs []*Buffer, inputsOwned []bool, outputShape shapes.Shape) (
 	lhs, rhs, output *Buffer, lhsIsScalarOr1, rhsIsScalarOr1 bool) {
 	lhs, rhs = inputs[0], inputs[1]
 	lhsIsScalarOr1, rhsIsScalarOr1 = lhs.shape.Size() == 1, rhs.shape.Size() == 1
@@ -31,11 +31,11 @@ func binaryOperandsAndOutput(backend *Backend, inputs []*Buffer, inputsOwned []b
 	return
 }
 
-// broadcastIterator allows one to iterate over the flat indices of tensor that is being broadcast
+// BroadcastIterator allows one to iterate over the flat indices of tensor that is being broadcast
 // (some dimensions will grow)
 //
 // It is used by implicit broadcasting in binaryOps as well as by the the BroadcastInDim.
-type broadcastIterator struct {
+type BroadcastIterator struct {
 	flatIdx     int
 	perAxesIdx  []int
 	targetDims  []int
@@ -43,18 +43,18 @@ type broadcastIterator struct {
 	strides     []int
 }
 
-// newBroadcastIterator returns an iterator that allows one to iterate over the flat indices of a tensor that is being broadcast,
+// NewBroadcastIterator returns an iterator that allows one to iterate over the flat indices of a tensor that is being broadcast,
 // where some dimensions will grow.
 //
 // Pre-requisite: fromShape.Rank() == toShape.Rank().
 //
 // It is used by implicit broadcasting in binaryOps as well as by the the execBroadcastInDim.
-func newBroadcastIterator(fromShape, toShape shapes.Shape) *broadcastIterator {
+func NewBroadcastIterator(fromShape, toShape shapes.Shape) *BroadcastIterator {
 	rank := fromShape.Rank() // == toShape.Rank()
 	if rank != toShape.Rank() {
 		exceptions.Panicf("broadcastIterator: rank mismatch fromShape=%s, toShape=%s", fromShape, toShape)
 	}
-	bi := &broadcastIterator{
+	bi := &BroadcastIterator{
 		perAxesIdx:  make([]int, rank),
 		targetDims:  slices.Clone(toShape.Dimensions),
 		isBroadcast: make([]bool, rank),
@@ -69,7 +69,7 @@ func newBroadcastIterator(fromShape, toShape shapes.Shape) *broadcastIterator {
 	return bi
 }
 
-func (bi *broadcastIterator) Next() (flatIdx int) {
+func (bi *BroadcastIterator) Next() (flatIdx int) {
 	flatIdx = bi.flatIdx
 	bi.flatIdx++
 	rank := len(bi.perAxesIdx)

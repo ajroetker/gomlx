@@ -38,7 +38,7 @@ func init() {
 
 // execAdd executes the binary op Add.
 func execAdd(backend *Backend, node *Node, inputs []*Buffer, inputsOwned []bool) (*Buffer, error) {
-	lhs, rhs, output, lhsIsScalarOr1, rhsIsScalarOr1 := binaryOperandsAndOutput(backend, inputs, inputsOwned, node.shape) // Add is commutative, so if any of the two is scalar, make the rhs the scalar one.
+	lhs, rhs, output, lhsIsScalarOr1, rhsIsScalarOr1 := BinaryOperandsAndOutput(backend, inputs, inputsOwned, node.shape) // Add is commutative, so if any of the two is scalar, make the rhs the scalar one.
 	if lhsIsScalarOr1 && !rhsIsScalarOr1 {
 		lhs, rhs = rhs, lhs
 		// if lhsIsScalarOr1 and/or rhsIsScalarOr1 variables should stay "alive", then uncomment the line below.
@@ -104,8 +104,8 @@ func execAddNumericGeneric[T PODNumericConstraints](lhs, rhs []T, output []T,
 
 	} else {
 		// Case 3: with broadcasting non-scalar tensors:
-		lhsIter := newBroadcastIterator(lhsShape, outputShape)
-		rhsIter := newBroadcastIterator(rhsShape, outputShape)
+		lhsIter := NewBroadcastIterator(lhsShape, outputShape)
+		rhsIter := NewBroadcastIterator(rhsShape, outputShape)
 		for outputIdx := range output {
 			lhsIdx := lhsIter.Next()
 			rhsIdx := rhsIter.Next()
@@ -137,8 +137,8 @@ func execAddNumericBFloat16(lhs, rhs []bfloat16.BFloat16, output []bfloat16.BFlo
 
 	} else {
 		// Case 3: with broadcasting non-scalar tensors:
-		lhsIter := newBroadcastIterator(lhsShape, outputShape)
-		rhsIter := newBroadcastIterator(rhsShape, outputShape)
+		lhsIter := NewBroadcastIterator(lhsShape, outputShape)
+		rhsIter := NewBroadcastIterator(rhsShape, outputShape)
 		for outputIdx := range output {
 			lhsIdx := lhsIter.Next()
 			rhsIdx := rhsIter.Next()
@@ -152,7 +152,7 @@ func execAddNumericBFloat16(lhs, rhs []bfloat16.BFloat16, output []bfloat16.BFlo
 
 // execMul executes the binary op Mul.
 func execMul(backend *Backend, node *Node, inputs []*Buffer, inputsOwned []bool) (*Buffer, error) {
-	lhs, rhs, output, lhsIsScalarOr1, rhsIsScalarOr1 := binaryOperandsAndOutput(backend, inputs, inputsOwned, node.shape) // Add is commutative, so if any of the two is scalar, make the rhs the scalar one.
+	lhs, rhs, output, lhsIsScalarOr1, rhsIsScalarOr1 := BinaryOperandsAndOutput(backend, inputs, inputsOwned, node.shape) // Add is commutative, so if any of the two is scalar, make the rhs the scalar one.
 	if lhsIsScalarOr1 && !rhsIsScalarOr1 {
 		lhs, rhs = rhs, lhs
 		// if lhsIsScalarOr1 and/or rhsIsScalarOr1 variables should stay "alive", then uncomment the line below.
@@ -218,8 +218,8 @@ func execMulNumericGeneric[T PODNumericConstraints](lhs, rhs []T, output []T,
 
 	} else {
 		// Case 3: with broadcasting non-scalar tensors:
-		lhsIter := newBroadcastIterator(lhsShape, outputShape)
-		rhsIter := newBroadcastIterator(rhsShape, outputShape)
+		lhsIter := NewBroadcastIterator(lhsShape, outputShape)
+		rhsIter := NewBroadcastIterator(rhsShape, outputShape)
 		for outputIdx := range output {
 			lhsIdx := lhsIter.Next()
 			rhsIdx := rhsIter.Next()
@@ -251,8 +251,8 @@ func execMulNumericBFloat16(lhs, rhs []bfloat16.BFloat16, output []bfloat16.BFlo
 
 	} else {
 		// Case 3: with broadcasting non-scalar tensors:
-		lhsIter := newBroadcastIterator(lhsShape, outputShape)
-		rhsIter := newBroadcastIterator(rhsShape, outputShape)
+		lhsIter := NewBroadcastIterator(lhsShape, outputShape)
+		rhsIter := NewBroadcastIterator(rhsShape, outputShape)
 		for outputIdx := range output {
 			lhsIdx := lhsIter.Next()
 			rhsIdx := rhsIter.Next()
@@ -266,7 +266,7 @@ func execMulNumericBFloat16(lhs, rhs []bfloat16.BFloat16, output []bfloat16.BFlo
 
 // execSub executes the binary op Sub.
 func execSub(backend *Backend, node *Node, inputs []*Buffer, inputsOwned []bool) (*Buffer, error) {
-	lhs, rhs, output, lhsIsScalarOr1, rhsIsScalarOr1 := binaryOperandsAndOutput(backend, inputs, inputsOwned, node.shape)
+	lhs, rhs, output, lhsIsScalarOr1, rhsIsScalarOr1 := BinaryOperandsAndOutput(backend, inputs, inputsOwned, node.shape)
 	_, _ = lhsIsScalarOr1, rhsIsScalarOr1
 
 	switch lhs.shape.DType {
@@ -335,8 +335,8 @@ func execSubNumericGeneric[T PODNumericConstraints](lhs, rhs []T, output []T,
 
 	} else {
 		// Case 3: with broadcasting non-scalar tensors:
-		lhsIter := newBroadcastIterator(lhsShape, outputShape)
-		rhsIter := newBroadcastIterator(rhsShape, outputShape)
+		lhsIter := NewBroadcastIterator(lhsShape, outputShape)
+		rhsIter := NewBroadcastIterator(rhsShape, outputShape)
 		for outputIdx := range output {
 			lhsIdx := lhsIter.Next()
 			rhsIdx := rhsIter.Next()
@@ -376,8 +376,8 @@ func execSubNumericBFloat16(lhs, rhs []bfloat16.BFloat16, output []bfloat16.BFlo
 
 	} else {
 		// Case 3: with broadcasting non-scalar tensors:
-		lhsIter := newBroadcastIterator(lhsShape, outputShape)
-		rhsIter := newBroadcastIterator(rhsShape, outputShape)
+		lhsIter := NewBroadcastIterator(lhsShape, outputShape)
+		rhsIter := NewBroadcastIterator(rhsShape, outputShape)
 		for outputIdx := range output {
 			lhsIdx := lhsIter.Next()
 			rhsIdx := rhsIter.Next()
@@ -391,7 +391,7 @@ func execSubNumericBFloat16(lhs, rhs []bfloat16.BFloat16, output []bfloat16.BFlo
 
 // execDiv executes the binary op Div.
 func execDiv(backend *Backend, node *Node, inputs []*Buffer, inputsOwned []bool) (*Buffer, error) {
-	lhs, rhs, output, lhsIsScalarOr1, rhsIsScalarOr1 := binaryOperandsAndOutput(backend, inputs, inputsOwned, node.shape)
+	lhs, rhs, output, lhsIsScalarOr1, rhsIsScalarOr1 := BinaryOperandsAndOutput(backend, inputs, inputsOwned, node.shape)
 	_, _ = lhsIsScalarOr1, rhsIsScalarOr1
 
 	switch lhs.shape.DType {
@@ -460,8 +460,8 @@ func execDivNumericGeneric[T PODNumericConstraints](lhs, rhs []T, output []T,
 
 	} else {
 		// Case 3: with broadcasting non-scalar tensors:
-		lhsIter := newBroadcastIterator(lhsShape, outputShape)
-		rhsIter := newBroadcastIterator(rhsShape, outputShape)
+		lhsIter := NewBroadcastIterator(lhsShape, outputShape)
+		rhsIter := NewBroadcastIterator(rhsShape, outputShape)
 		for outputIdx := range output {
 			lhsIdx := lhsIter.Next()
 			rhsIdx := rhsIter.Next()
@@ -501,8 +501,8 @@ func execDivNumericBFloat16(lhs, rhs []bfloat16.BFloat16, output []bfloat16.BFlo
 
 	} else {
 		// Case 3: with broadcasting non-scalar tensors:
-		lhsIter := newBroadcastIterator(lhsShape, outputShape)
-		rhsIter := newBroadcastIterator(rhsShape, outputShape)
+		lhsIter := NewBroadcastIterator(lhsShape, outputShape)
+		rhsIter := NewBroadcastIterator(rhsShape, outputShape)
 		for outputIdx := range output {
 			lhsIdx := lhsIter.Next()
 			rhsIdx := rhsIter.Next()
@@ -516,7 +516,7 @@ func execDivNumericBFloat16(lhs, rhs []bfloat16.BFloat16, output []bfloat16.BFlo
 
 // execRem executes the binary op Rem.
 func execRem(backend *Backend, node *Node, inputs []*Buffer, inputsOwned []bool) (*Buffer, error) {
-	lhs, rhs, output, lhsIsScalarOr1, rhsIsScalarOr1 := binaryOperandsAndOutput(backend, inputs, inputsOwned, node.shape)
+	lhs, rhs, output, lhsIsScalarOr1, rhsIsScalarOr1 := BinaryOperandsAndOutput(backend, inputs, inputsOwned, node.shape)
 	_, _ = lhsIsScalarOr1, rhsIsScalarOr1
 
 	switch lhs.shape.DType {
@@ -585,8 +585,8 @@ func execRemIntegerGeneric[T PODIntegerConstraints](lhs, rhs []T, output []T,
 
 	} else {
 		// Case 3: with broadcasting non-scalar tensors:
-		lhsIter := newBroadcastIterator(lhsShape, outputShape)
-		rhsIter := newBroadcastIterator(rhsShape, outputShape)
+		lhsIter := NewBroadcastIterator(lhsShape, outputShape)
+		rhsIter := NewBroadcastIterator(rhsShape, outputShape)
 		for outputIdx := range output {
 			lhsIdx := lhsIter.Next()
 			rhsIdx := rhsIter.Next()
@@ -622,8 +622,8 @@ func execRemFloatGeneric[T PODFloatConstraints](lhs, rhs []T, output []T,
 
 	} else {
 		// Case 3: with broadcasting non-scalar tensors:
-		lhsIter := newBroadcastIterator(lhsShape, outputShape)
-		rhsIter := newBroadcastIterator(rhsShape, outputShape)
+		lhsIter := NewBroadcastIterator(lhsShape, outputShape)
+		rhsIter := NewBroadcastIterator(rhsShape, outputShape)
 		for outputIdx := range output {
 			lhsIdx := lhsIter.Next()
 			rhsIdx := rhsIter.Next()
@@ -663,8 +663,8 @@ func execRemFloatBFloat16(lhs, rhs []bfloat16.BFloat16, output []bfloat16.BFloat
 
 	} else {
 		// Case 3: with broadcasting non-scalar tensors:
-		lhsIter := newBroadcastIterator(lhsShape, outputShape)
-		rhsIter := newBroadcastIterator(rhsShape, outputShape)
+		lhsIter := NewBroadcastIterator(lhsShape, outputShape)
+		rhsIter := NewBroadcastIterator(rhsShape, outputShape)
 		for outputIdx := range output {
 			lhsIdx := lhsIter.Next()
 			rhsIdx := rhsIter.Next()
@@ -678,7 +678,7 @@ func execRemFloatBFloat16(lhs, rhs []bfloat16.BFloat16, output []bfloat16.BFloat
 
 // execPow executes the binary op Pow.
 func execPow(backend *Backend, node *Node, inputs []*Buffer, inputsOwned []bool) (*Buffer, error) {
-	lhs, rhs, output, lhsIsScalarOr1, rhsIsScalarOr1 := binaryOperandsAndOutput(backend, inputs, inputsOwned, node.shape)
+	lhs, rhs, output, lhsIsScalarOr1, rhsIsScalarOr1 := BinaryOperandsAndOutput(backend, inputs, inputsOwned, node.shape)
 	_, _ = lhsIsScalarOr1, rhsIsScalarOr1
 
 	switch lhs.shape.DType {
@@ -747,8 +747,8 @@ func execPowIntegerGeneric[T PODIntegerConstraints](lhs, rhs []T, output []T,
 
 	} else {
 		// Case 3: with broadcasting non-scalar tensors:
-		lhsIter := newBroadcastIterator(lhsShape, outputShape)
-		rhsIter := newBroadcastIterator(rhsShape, outputShape)
+		lhsIter := NewBroadcastIterator(lhsShape, outputShape)
+		rhsIter := NewBroadcastIterator(rhsShape, outputShape)
 		for outputIdx := range output {
 			lhsIdx := lhsIter.Next()
 			rhsIdx := rhsIter.Next()
@@ -784,8 +784,8 @@ func execPowFloatGeneric[T PODFloatConstraints](lhs, rhs []T, output []T,
 
 	} else {
 		// Case 3: with broadcasting non-scalar tensors:
-		lhsIter := newBroadcastIterator(lhsShape, outputShape)
-		rhsIter := newBroadcastIterator(rhsShape, outputShape)
+		lhsIter := NewBroadcastIterator(lhsShape, outputShape)
+		rhsIter := NewBroadcastIterator(rhsShape, outputShape)
 		for outputIdx := range output {
 			lhsIdx := lhsIter.Next()
 			rhsIdx := rhsIter.Next()
@@ -825,8 +825,8 @@ func execPowFloatBFloat16(lhs, rhs []bfloat16.BFloat16, output []bfloat16.BFloat
 
 	} else {
 		// Case 3: with broadcasting non-scalar tensors:
-		lhsIter := newBroadcastIterator(lhsShape, outputShape)
-		rhsIter := newBroadcastIterator(rhsShape, outputShape)
+		lhsIter := NewBroadcastIterator(lhsShape, outputShape)
+		rhsIter := NewBroadcastIterator(rhsShape, outputShape)
 		for outputIdx := range output {
 			lhsIdx := lhsIter.Next()
 			rhsIdx := rhsIter.Next()
@@ -840,7 +840,7 @@ func execPowFloatBFloat16(lhs, rhs []bfloat16.BFloat16, output []bfloat16.BFloat
 
 // execAtan2 executes the binary op Atan2.
 func execAtan2(backend *Backend, node *Node, inputs []*Buffer, inputsOwned []bool) (*Buffer, error) {
-	lhs, rhs, output, lhsIsScalarOr1, rhsIsScalarOr1 := binaryOperandsAndOutput(backend, inputs, inputsOwned, node.shape)
+	lhs, rhs, output, lhsIsScalarOr1, rhsIsScalarOr1 := BinaryOperandsAndOutput(backend, inputs, inputsOwned, node.shape)
 	_, _ = lhsIsScalarOr1, rhsIsScalarOr1
 
 	switch lhs.shape.DType {
@@ -885,8 +885,8 @@ func execAtan2FloatGeneric[T PODFloatConstraints](lhs, rhs []T, output []T,
 
 	} else {
 		// Case 3: with broadcasting non-scalar tensors:
-		lhsIter := newBroadcastIterator(lhsShape, outputShape)
-		rhsIter := newBroadcastIterator(rhsShape, outputShape)
+		lhsIter := NewBroadcastIterator(lhsShape, outputShape)
+		rhsIter := NewBroadcastIterator(rhsShape, outputShape)
 		for outputIdx := range output {
 			lhsIdx := lhsIter.Next()
 			rhsIdx := rhsIter.Next()
@@ -926,8 +926,8 @@ func execAtan2FloatBFloat16(lhs, rhs []bfloat16.BFloat16, output []bfloat16.BFlo
 
 	} else {
 		// Case 3: with broadcasting non-scalar tensors:
-		lhsIter := newBroadcastIterator(lhsShape, outputShape)
-		rhsIter := newBroadcastIterator(rhsShape, outputShape)
+		lhsIter := NewBroadcastIterator(lhsShape, outputShape)
+		rhsIter := NewBroadcastIterator(rhsShape, outputShape)
 		for outputIdx := range output {
 			lhsIdx := lhsIter.Next()
 			rhsIdx := rhsIter.Next()
@@ -941,7 +941,7 @@ func execAtan2FloatBFloat16(lhs, rhs []bfloat16.BFloat16, output []bfloat16.BFlo
 
 // execMax executes the binary op Max.
 func execMax(backend *Backend, node *Node, inputs []*Buffer, inputsOwned []bool) (*Buffer, error) {
-	lhs, rhs, output, lhsIsScalarOr1, rhsIsScalarOr1 := binaryOperandsAndOutput(backend, inputs, inputsOwned, node.shape) // Add is commutative, so if any of the two is scalar, make the rhs the scalar one.
+	lhs, rhs, output, lhsIsScalarOr1, rhsIsScalarOr1 := BinaryOperandsAndOutput(backend, inputs, inputsOwned, node.shape) // Add is commutative, so if any of the two is scalar, make the rhs the scalar one.
 	if lhsIsScalarOr1 && !rhsIsScalarOr1 {
 		lhs, rhs = rhs, lhs
 		// if lhsIsScalarOr1 and/or rhsIsScalarOr1 variables should stay "alive", then uncomment the line below.
@@ -1007,8 +1007,8 @@ func execMaxNumericGeneric[T PODNumericConstraints](lhs, rhs []T, output []T,
 
 	} else {
 		// Case 3: with broadcasting non-scalar tensors:
-		lhsIter := newBroadcastIterator(lhsShape, outputShape)
-		rhsIter := newBroadcastIterator(rhsShape, outputShape)
+		lhsIter := NewBroadcastIterator(lhsShape, outputShape)
+		rhsIter := NewBroadcastIterator(rhsShape, outputShape)
 		for outputIdx := range output {
 			lhsIdx := lhsIter.Next()
 			rhsIdx := rhsIter.Next()
@@ -1040,8 +1040,8 @@ func execMaxNumericBFloat16(lhs, rhs []bfloat16.BFloat16, output []bfloat16.BFlo
 
 	} else {
 		// Case 3: with broadcasting non-scalar tensors:
-		lhsIter := newBroadcastIterator(lhsShape, outputShape)
-		rhsIter := newBroadcastIterator(rhsShape, outputShape)
+		lhsIter := NewBroadcastIterator(lhsShape, outputShape)
+		rhsIter := NewBroadcastIterator(rhsShape, outputShape)
 		for outputIdx := range output {
 			lhsIdx := lhsIter.Next()
 			rhsIdx := rhsIter.Next()
@@ -1055,7 +1055,7 @@ func execMaxNumericBFloat16(lhs, rhs []bfloat16.BFloat16, output []bfloat16.BFlo
 
 // execMin executes the binary op Min.
 func execMin(backend *Backend, node *Node, inputs []*Buffer, inputsOwned []bool) (*Buffer, error) {
-	lhs, rhs, output, lhsIsScalarOr1, rhsIsScalarOr1 := binaryOperandsAndOutput(backend, inputs, inputsOwned, node.shape) // Add is commutative, so if any of the two is scalar, make the rhs the scalar one.
+	lhs, rhs, output, lhsIsScalarOr1, rhsIsScalarOr1 := BinaryOperandsAndOutput(backend, inputs, inputsOwned, node.shape) // Add is commutative, so if any of the two is scalar, make the rhs the scalar one.
 	if lhsIsScalarOr1 && !rhsIsScalarOr1 {
 		lhs, rhs = rhs, lhs
 		// if lhsIsScalarOr1 and/or rhsIsScalarOr1 variables should stay "alive", then uncomment the line below.
@@ -1121,8 +1121,8 @@ func execMinNumericGeneric[T PODNumericConstraints](lhs, rhs []T, output []T,
 
 	} else {
 		// Case 3: with broadcasting non-scalar tensors:
-		lhsIter := newBroadcastIterator(lhsShape, outputShape)
-		rhsIter := newBroadcastIterator(rhsShape, outputShape)
+		lhsIter := NewBroadcastIterator(lhsShape, outputShape)
+		rhsIter := NewBroadcastIterator(rhsShape, outputShape)
 		for outputIdx := range output {
 			lhsIdx := lhsIter.Next()
 			rhsIdx := rhsIter.Next()
@@ -1154,8 +1154,8 @@ func execMinNumericBFloat16(lhs, rhs []bfloat16.BFloat16, output []bfloat16.BFlo
 
 	} else {
 		// Case 3: with broadcasting non-scalar tensors:
-		lhsIter := newBroadcastIterator(lhsShape, outputShape)
-		rhsIter := newBroadcastIterator(rhsShape, outputShape)
+		lhsIter := NewBroadcastIterator(lhsShape, outputShape)
+		rhsIter := NewBroadcastIterator(rhsShape, outputShape)
 		for outputIdx := range output {
 			lhsIdx := lhsIter.Next()
 			rhsIdx := rhsIter.Next()
@@ -1169,7 +1169,7 @@ func execMinNumericBFloat16(lhs, rhs []bfloat16.BFloat16, output []bfloat16.BFlo
 
 // execBitwiseAnd executes the binary op BitwiseAnd.
 func execBitwiseAnd(backend *Backend, node *Node, inputs []*Buffer, inputsOwned []bool) (*Buffer, error) {
-	lhs, rhs, output, lhsIsScalarOr1, rhsIsScalarOr1 := binaryOperandsAndOutput(backend, inputs, inputsOwned, node.shape)
+	lhs, rhs, output, lhsIsScalarOr1, rhsIsScalarOr1 := BinaryOperandsAndOutput(backend, inputs, inputsOwned, node.shape)
 	_, _ = lhsIsScalarOr1, rhsIsScalarOr1
 
 	switch lhs.shape.DType {
@@ -1229,8 +1229,8 @@ func execBitwiseAndIntegerGeneric[T PODIntegerConstraints](lhs, rhs []T, output 
 
 	} else {
 		// Case 3: with broadcasting non-scalar tensors:
-		lhsIter := newBroadcastIterator(lhsShape, outputShape)
-		rhsIter := newBroadcastIterator(rhsShape, outputShape)
+		lhsIter := NewBroadcastIterator(lhsShape, outputShape)
+		rhsIter := NewBroadcastIterator(rhsShape, outputShape)
 		for outputIdx := range output {
 			lhsIdx := lhsIter.Next()
 			rhsIdx := rhsIter.Next()
@@ -1242,7 +1242,7 @@ func execBitwiseAndIntegerGeneric[T PODIntegerConstraints](lhs, rhs []T, output 
 
 // execBitwiseOr executes the binary op BitwiseOr.
 func execBitwiseOr(backend *Backend, node *Node, inputs []*Buffer, inputsOwned []bool) (*Buffer, error) {
-	lhs, rhs, output, lhsIsScalarOr1, rhsIsScalarOr1 := binaryOperandsAndOutput(backend, inputs, inputsOwned, node.shape)
+	lhs, rhs, output, lhsIsScalarOr1, rhsIsScalarOr1 := BinaryOperandsAndOutput(backend, inputs, inputsOwned, node.shape)
 	_, _ = lhsIsScalarOr1, rhsIsScalarOr1
 
 	switch lhs.shape.DType {
@@ -1302,8 +1302,8 @@ func execBitwiseOrIntegerGeneric[T PODIntegerConstraints](lhs, rhs []T, output [
 
 	} else {
 		// Case 3: with broadcasting non-scalar tensors:
-		lhsIter := newBroadcastIterator(lhsShape, outputShape)
-		rhsIter := newBroadcastIterator(rhsShape, outputShape)
+		lhsIter := NewBroadcastIterator(lhsShape, outputShape)
+		rhsIter := NewBroadcastIterator(rhsShape, outputShape)
 		for outputIdx := range output {
 			lhsIdx := lhsIter.Next()
 			rhsIdx := rhsIter.Next()
@@ -1315,7 +1315,7 @@ func execBitwiseOrIntegerGeneric[T PODIntegerConstraints](lhs, rhs []T, output [
 
 // execBitwiseXor executes the binary op BitwiseXor.
 func execBitwiseXor(backend *Backend, node *Node, inputs []*Buffer, inputsOwned []bool) (*Buffer, error) {
-	lhs, rhs, output, lhsIsScalarOr1, rhsIsScalarOr1 := binaryOperandsAndOutput(backend, inputs, inputsOwned, node.shape)
+	lhs, rhs, output, lhsIsScalarOr1, rhsIsScalarOr1 := BinaryOperandsAndOutput(backend, inputs, inputsOwned, node.shape)
 	_, _ = lhsIsScalarOr1, rhsIsScalarOr1
 
 	switch lhs.shape.DType {
@@ -1375,8 +1375,8 @@ func execBitwiseXorIntegerGeneric[T PODIntegerConstraints](lhs, rhs []T, output 
 
 	} else {
 		// Case 3: with broadcasting non-scalar tensors:
-		lhsIter := newBroadcastIterator(lhsShape, outputShape)
-		rhsIter := newBroadcastIterator(rhsShape, outputShape)
+		lhsIter := NewBroadcastIterator(lhsShape, outputShape)
+		rhsIter := NewBroadcastIterator(rhsShape, outputShape)
 		for outputIdx := range output {
 			lhsIdx := lhsIter.Next()
 			rhsIdx := rhsIter.Next()
@@ -1388,7 +1388,7 @@ func execBitwiseXorIntegerGeneric[T PODIntegerConstraints](lhs, rhs []T, output 
 
 // execLogicalAnd executes the binary op LogicalAnd.
 func execLogicalAnd(backend *Backend, node *Node, inputs []*Buffer, inputsOwned []bool) (*Buffer, error) {
-	lhs, rhs, output, lhsIsScalarOr1, rhsIsScalarOr1 := binaryOperandsAndOutput(backend, inputs, inputsOwned, node.shape)
+	lhs, rhs, output, lhsIsScalarOr1, rhsIsScalarOr1 := BinaryOperandsAndOutput(backend, inputs, inputsOwned, node.shape)
 	_, _ = lhsIsScalarOr1, rhsIsScalarOr1
 
 	switch lhs.shape.DType {
@@ -1428,8 +1428,8 @@ func execLogicalAndBooleanGeneric[T PODBooleanConstraints](lhs, rhs []T, output 
 
 	} else {
 		// Case 3: with broadcasting non-scalar tensors:
-		lhsIter := newBroadcastIterator(lhsShape, outputShape)
-		rhsIter := newBroadcastIterator(rhsShape, outputShape)
+		lhsIter := NewBroadcastIterator(lhsShape, outputShape)
+		rhsIter := NewBroadcastIterator(rhsShape, outputShape)
 		for outputIdx := range output {
 			lhsIdx := lhsIter.Next()
 			rhsIdx := rhsIter.Next()
@@ -1441,7 +1441,7 @@ func execLogicalAndBooleanGeneric[T PODBooleanConstraints](lhs, rhs []T, output 
 
 // execLogicalOr executes the binary op LogicalOr.
 func execLogicalOr(backend *Backend, node *Node, inputs []*Buffer, inputsOwned []bool) (*Buffer, error) {
-	lhs, rhs, output, lhsIsScalarOr1, rhsIsScalarOr1 := binaryOperandsAndOutput(backend, inputs, inputsOwned, node.shape)
+	lhs, rhs, output, lhsIsScalarOr1, rhsIsScalarOr1 := BinaryOperandsAndOutput(backend, inputs, inputsOwned, node.shape)
 	_, _ = lhsIsScalarOr1, rhsIsScalarOr1
 
 	switch lhs.shape.DType {
@@ -1481,8 +1481,8 @@ func execLogicalOrBooleanGeneric[T PODBooleanConstraints](lhs, rhs []T, output [
 
 	} else {
 		// Case 3: with broadcasting non-scalar tensors:
-		lhsIter := newBroadcastIterator(lhsShape, outputShape)
-		rhsIter := newBroadcastIterator(rhsShape, outputShape)
+		lhsIter := NewBroadcastIterator(lhsShape, outputShape)
+		rhsIter := NewBroadcastIterator(rhsShape, outputShape)
 		for outputIdx := range output {
 			lhsIdx := lhsIter.Next()
 			rhsIdx := rhsIter.Next()
@@ -1494,7 +1494,7 @@ func execLogicalOrBooleanGeneric[T PODBooleanConstraints](lhs, rhs []T, output [
 
 // execLogicalXor executes the binary op LogicalXor.
 func execLogicalXor(backend *Backend, node *Node, inputs []*Buffer, inputsOwned []bool) (*Buffer, error) {
-	lhs, rhs, output, lhsIsScalarOr1, rhsIsScalarOr1 := binaryOperandsAndOutput(backend, inputs, inputsOwned, node.shape)
+	lhs, rhs, output, lhsIsScalarOr1, rhsIsScalarOr1 := BinaryOperandsAndOutput(backend, inputs, inputsOwned, node.shape)
 	_, _ = lhsIsScalarOr1, rhsIsScalarOr1
 
 	switch lhs.shape.DType {
@@ -1534,8 +1534,8 @@ func execLogicalXorBooleanGeneric[T PODBooleanConstraints](lhs, rhs []T, output 
 
 	} else {
 		// Case 3: with broadcasting non-scalar tensors:
-		lhsIter := newBroadcastIterator(lhsShape, outputShape)
-		rhsIter := newBroadcastIterator(rhsShape, outputShape)
+		lhsIter := NewBroadcastIterator(lhsShape, outputShape)
+		rhsIter := NewBroadcastIterator(rhsShape, outputShape)
 		for outputIdx := range output {
 			lhsIdx := lhsIter.Next()
 			rhsIdx := rhsIter.Next()
@@ -1616,8 +1616,8 @@ func execEqualNumericGeneric[T PODNumericConstraints](lhs, rhs []T, output []boo
 
 	} else {
 		// Case 3: with broadcasting non-scalar tensors:
-		lhsIter := newBroadcastIterator(lhsShape, outputShape)
-		rhsIter := newBroadcastIterator(rhsShape, outputShape)
+		lhsIter := NewBroadcastIterator(lhsShape, outputShape)
+		rhsIter := NewBroadcastIterator(rhsShape, outputShape)
 		for outputIdx := range output {
 			lhsIdx := lhsIter.Next()
 			rhsIdx := rhsIter.Next()
@@ -1649,8 +1649,8 @@ func execEqualNumericBFloat16(lhs, rhs []bfloat16.BFloat16, output []bool,
 
 	} else {
 		// Case 3: with broadcasting non-scalar tensors:
-		lhsIter := newBroadcastIterator(lhsShape, outputShape)
-		rhsIter := newBroadcastIterator(rhsShape, outputShape)
+		lhsIter := NewBroadcastIterator(lhsShape, outputShape)
+		rhsIter := NewBroadcastIterator(rhsShape, outputShape)
 		for outputIdx := range output {
 			lhsIdx := lhsIter.Next()
 			rhsIdx := rhsIter.Next()
@@ -1733,8 +1733,8 @@ func execNotEqualNumericGeneric[T PODNumericConstraints](lhs, rhs []T, output []
 
 	} else {
 		// Case 3: with broadcasting non-scalar tensors:
-		lhsIter := newBroadcastIterator(lhsShape, outputShape)
-		rhsIter := newBroadcastIterator(rhsShape, outputShape)
+		lhsIter := NewBroadcastIterator(lhsShape, outputShape)
+		rhsIter := NewBroadcastIterator(rhsShape, outputShape)
 		for outputIdx := range output {
 			lhsIdx := lhsIter.Next()
 			rhsIdx := rhsIter.Next()
@@ -1766,8 +1766,8 @@ func execNotEqualNumericBFloat16(lhs, rhs []bfloat16.BFloat16, output []bool,
 
 	} else {
 		// Case 3: with broadcasting non-scalar tensors:
-		lhsIter := newBroadcastIterator(lhsShape, outputShape)
-		rhsIter := newBroadcastIterator(rhsShape, outputShape)
+		lhsIter := NewBroadcastIterator(lhsShape, outputShape)
+		rhsIter := NewBroadcastIterator(rhsShape, outputShape)
 		for outputIdx := range output {
 			lhsIdx := lhsIter.Next()
 			rhsIdx := rhsIter.Next()
@@ -1853,8 +1853,8 @@ func execGreaterOrEqualNumericGeneric[T PODNumericConstraints](lhs, rhs []T, out
 
 	} else {
 		// Case 3: with broadcasting non-scalar tensors:
-		lhsIter := newBroadcastIterator(lhsShape, outputShape)
-		rhsIter := newBroadcastIterator(rhsShape, outputShape)
+		lhsIter := NewBroadcastIterator(lhsShape, outputShape)
+		rhsIter := NewBroadcastIterator(rhsShape, outputShape)
 		for outputIdx := range output {
 			lhsIdx := lhsIter.Next()
 			rhsIdx := rhsIter.Next()
@@ -1894,8 +1894,8 @@ func execGreaterOrEqualNumericBFloat16(lhs, rhs []bfloat16.BFloat16, output []bo
 
 	} else {
 		// Case 3: with broadcasting non-scalar tensors:
-		lhsIter := newBroadcastIterator(lhsShape, outputShape)
-		rhsIter := newBroadcastIterator(rhsShape, outputShape)
+		lhsIter := NewBroadcastIterator(lhsShape, outputShape)
+		rhsIter := NewBroadcastIterator(rhsShape, outputShape)
 		for outputIdx := range output {
 			lhsIdx := lhsIter.Next()
 			rhsIdx := rhsIter.Next()
@@ -1981,8 +1981,8 @@ func execGreaterThanNumericGeneric[T PODNumericConstraints](lhs, rhs []T, output
 
 	} else {
 		// Case 3: with broadcasting non-scalar tensors:
-		lhsIter := newBroadcastIterator(lhsShape, outputShape)
-		rhsIter := newBroadcastIterator(rhsShape, outputShape)
+		lhsIter := NewBroadcastIterator(lhsShape, outputShape)
+		rhsIter := NewBroadcastIterator(rhsShape, outputShape)
 		for outputIdx := range output {
 			lhsIdx := lhsIter.Next()
 			rhsIdx := rhsIter.Next()
@@ -2022,8 +2022,8 @@ func execGreaterThanNumericBFloat16(lhs, rhs []bfloat16.BFloat16, output []bool,
 
 	} else {
 		// Case 3: with broadcasting non-scalar tensors:
-		lhsIter := newBroadcastIterator(lhsShape, outputShape)
-		rhsIter := newBroadcastIterator(rhsShape, outputShape)
+		lhsIter := NewBroadcastIterator(lhsShape, outputShape)
+		rhsIter := NewBroadcastIterator(rhsShape, outputShape)
 		for outputIdx := range output {
 			lhsIdx := lhsIter.Next()
 			rhsIdx := rhsIter.Next()
@@ -2109,8 +2109,8 @@ func execLessOrEqualNumericGeneric[T PODNumericConstraints](lhs, rhs []T, output
 
 	} else {
 		// Case 3: with broadcasting non-scalar tensors:
-		lhsIter := newBroadcastIterator(lhsShape, outputShape)
-		rhsIter := newBroadcastIterator(rhsShape, outputShape)
+		lhsIter := NewBroadcastIterator(lhsShape, outputShape)
+		rhsIter := NewBroadcastIterator(rhsShape, outputShape)
 		for outputIdx := range output {
 			lhsIdx := lhsIter.Next()
 			rhsIdx := rhsIter.Next()
@@ -2150,8 +2150,8 @@ func execLessOrEqualNumericBFloat16(lhs, rhs []bfloat16.BFloat16, output []bool,
 
 	} else {
 		// Case 3: with broadcasting non-scalar tensors:
-		lhsIter := newBroadcastIterator(lhsShape, outputShape)
-		rhsIter := newBroadcastIterator(rhsShape, outputShape)
+		lhsIter := NewBroadcastIterator(lhsShape, outputShape)
+		rhsIter := NewBroadcastIterator(rhsShape, outputShape)
 		for outputIdx := range output {
 			lhsIdx := lhsIter.Next()
 			rhsIdx := rhsIter.Next()
@@ -2237,8 +2237,8 @@ func execLessThanNumericGeneric[T PODNumericConstraints](lhs, rhs []T, output []
 
 	} else {
 		// Case 3: with broadcasting non-scalar tensors:
-		lhsIter := newBroadcastIterator(lhsShape, outputShape)
-		rhsIter := newBroadcastIterator(rhsShape, outputShape)
+		lhsIter := NewBroadcastIterator(lhsShape, outputShape)
+		rhsIter := NewBroadcastIterator(rhsShape, outputShape)
 		for outputIdx := range output {
 			lhsIdx := lhsIter.Next()
 			rhsIdx := rhsIter.Next()
@@ -2278,8 +2278,8 @@ func execLessThanNumericBFloat16(lhs, rhs []bfloat16.BFloat16, output []bool,
 
 	} else {
 		// Case 3: with broadcasting non-scalar tensors:
-		lhsIter := newBroadcastIterator(lhsShape, outputShape)
-		rhsIter := newBroadcastIterator(rhsShape, outputShape)
+		lhsIter := NewBroadcastIterator(lhsShape, outputShape)
+		rhsIter := NewBroadcastIterator(rhsShape, outputShape)
 		for outputIdx := range output {
 			lhsIdx := lhsIter.Next()
 			rhsIdx := rhsIter.Next()

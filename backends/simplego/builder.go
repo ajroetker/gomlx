@@ -150,6 +150,11 @@ type Node struct {
 }
 
 
+// Shape returns the output shape of this node.
+func (n *Node) Shape() shapes.Shape {
+	return n.shape
+}
+
 // MultiOutputValues converts a multi-output node's outputs to []backends.Value.
 func (node *Node) MultiOutputValues() []backends.Value {
 	outputs := make([]backends.Value, len(node.multiOutputsNodes))

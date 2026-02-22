@@ -769,7 +769,7 @@ func execBroadcastInDim(backend *Backend, node *Node, inputs []*Buffer, inputsOw
 	}
 
 	// Create broadcasting the iterator: it requires operand and output shapes to have the same rank.
-	iter := newBroadcastIterator(reshapedOperand, output.shape)
+	iter := NewBroadcastIterator(reshapedOperand, output.shape)
 	dispatchBroadcastInDim.Dispatch(output.shape.DType, operand.flat, output.flat, iter)
 	return output, nil
 }
@@ -783,7 +783,7 @@ func execBroadcastInDimGeneric[T SupportedTypesConstraints](params ...any) any {
 		xslices.FillSlice(outputFlat, operandFlat[0])
 		return nil
 	}
-	operandIter := operandIterAny.(*broadcastIterator)
+	operandIter := operandIterAny.(*BroadcastIterator)
 	for outputIdx := range outputFlat {
 		outputFlat[outputIdx] = operandFlat[operandIter.Next()]
 	}

@@ -113,8 +113,8 @@ var (
 	// nodeExecutors should be populated during initialization (`init` functions) for the ops implemented.
 	// For the nodes not implemented, leave it as nil, and it will return an error.
 	//
-	// nodeExecutors should be populated with a priority (see setNodeExecutor), which can conctorl whether
-	// to overwrite a nodeExecutors configuration independent of the order of settting.
+	// nodeExecutors should be populated with a priority (see setNodeExecutor), which can control whether
+	// to overwrite a nodeExecutors configuration independent of the order of setting.
 	nodeExecutors         [backends.OpTypeLast]nodeExecutor
 	nodeExecutorsPriority [backends.OpTypeLast]registerPriority
 
@@ -163,6 +163,12 @@ type NodeExecutor = nodeExecutor
 // This is the exported version of setNodeExecutor for use by subpackages.
 func SetNodeExecutor(opType backends.OpType, priority registerPriority, executor NodeExecutor) {
 	setNodeExecutor(opType, priority, executor)
+}
+
+// GetNodeExecutor returns the currently registered executor for the given op type.
+// This allows higher-priority executors to wrap and delegate to lower-priority ones.
+func GetNodeExecutor(opType backends.OpType) NodeExecutor {
+	return nodeExecutors[opType]
 }
 
 // MultiOutputNodeExecutor is the exported type for multi-output node executor functions.

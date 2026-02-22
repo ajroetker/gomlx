@@ -54,9 +54,9 @@ func SDPAParams(node *Node) (numHeads, numKVHeads int, axesLayout backends.AxesL
 }
 
 // QKVProjectionParams extracts the parameters from a FusedAttentionQKVProjection node.
-func QKVProjectionParams(node *Node) (qDim, kvDim int) {
+func QKVProjectionParams(node *Node) (qDim, kvDim int, hasBiasQ, hasBiasK, hasBiasV bool) {
 	data := node.data.(*nodeFusedAttentionQKVProjection)
-	return data.qDim, data.kvDim
+	return data.qDim, data.kvDim, data.hasBiasQ, data.hasBiasK, data.hasBiasV
 }
 
 // QKVProjectionOutputBuffers allocates the three output buffers (q, k, v) for a QKVProjection node.

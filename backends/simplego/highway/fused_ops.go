@@ -202,49 +202,6 @@ func execLayerNormHighway(backend *simplego.Backend, node *simplego.Node, inputs
 	return output, nil
 }
 
-// execDenseHighway implements SIMD-accelerated dense layer: y = x @ W + b.
-// Weight is [in_features, out_features]. We transpose it to [out, in] for
-// compatibility with nn.DenseAuto which expects [out_features, in_features].
-func execDenseHighway(backend *simplego.Backend, node *simplego.Node, inputs []*simplego.Buffer, inputsOwned []bool) (*simplego.Buffer, error) {
-	x := inputs[0]
-	weight := inputs[1]
-	var bias *simplego.Buffer
-	if len(inputs) > 2 {
-		bias = inputs[2]
-	}
-
-	output := simplego.FusedOpOutput(backend, node)
-
-	inFeatures := x.Shape().Dimensions[x.Shape().Rank()-1]
-	outFeatures := weight.Shape().Dimensions[1]
-	batchSize := x.Shape().Size() / inFeatures
-
-	switch x.DType() {
-	case dtypes.Float32:
-		var biasData []float32
-		if bias != nil {
-			biasData = bias.Flat().([]float32)
-		}
-		// Transpose weight from [in, out] to [out, in] for nn.DenseAuto.
-		wTransposed := make([]float32, inFeatures*outFeatures)
-		matmul.Transpose2D(weight.Flat().([]float32), inFeatures, outFeatures, wTransposed)
-		nn.DenseAuto(hwyPool, x.Flat().([]float32), wTransposed, biasData, output.Flat().([]float32),
-			batchSize, inFeatures, outFeatures)
-	case dtypes.Float64:
-		var biasData []float64
-		if bias != nil {
-			biasData = bias.Flat().([]float64)
-		}
-		wTransposed := make([]float64, inFeatures*outFeatures)
-		matmul.Transpose2D(weight.Flat().([]float64), inFeatures, outFeatures, wTransposed)
-		nn.DenseAuto(hwyPool, x.Flat().([]float64), wTransposed, biasData, output.Flat().([]float64),
-			batchSize, inFeatures, outFeatures)
-	default:
-		return nil, errors.Errorf("highway Dense: unsupported dtype %s", x.DType())
-	}
-	return output, nil
-}
-
 // execQKVProjectionHighway implements SIMD-accelerated fused QKV projection.
 // Weight wQKV is [inFeatures, totalOut] (ONNX convention). We transpose to [totalOut, inFeatures]
 // for nn.QKVDenseAuto which uses MatMulKLastAuto (K-last / PyTorch convention).
@@ -254,7 +211,7 @@ func execQKVProjectionHighway(backend *simplego.Backend, node *simplego.Node, in
 	x := inputs[1]
 	wQKV := inputs[2]
 
-	qDim, kvDim := simplego.QKVProjectionParams(node)
+	qDim, kvDim, hasBiasQ, hasBiasK, hasBiasV := simplego.QKVProjectionParams(node)
 	totalOut := qDim + 2*kvDim
 
 	qBuf, kBuf, vBuf := simplego.QKVProjectionOutputBuffers(backend, node)
@@ -262,17 +219,19 @@ func execQKVProjectionHighway(backend *simplego.Backend, node *simplego.Node, in
 	inFeatures := x.Shape().Dimensions[x.Shape().Rank()-1]
 	batchSize := x.Shape().Size() / inFeatures
 
+	// Use flag-based indexing (matching the scalar fallback) to correctly
+	// handle partially-specified biases.
 	var biasQ, biasK, biasV *simplego.Buffer
 	biasIdx := 3
-	if biasIdx < len(inputs) {
+	if hasBiasQ {
 		biasQ = inputs[biasIdx]
 		biasIdx++
 	}
-	if biasIdx < len(inputs) {
+	if hasBiasK {
 		biasK = inputs[biasIdx]
 		biasIdx++
 	}
-	if biasIdx < len(inputs) {
+	if hasBiasV {
 		biasV = inputs[biasIdx]
 	}
 
@@ -548,6 +507,26 @@ func boolToAdditiveMask[T ~float32 | ~float64](boolMask []bool) []T {
 	return out
 }
 
+// backendToNNActivation converts a backends.ActivationType to the go-highway nn.ActivationType.
+func backendToNNActivation(act backends.ActivationType) nn.ActivationType {
+	switch act {
+	case backends.ActivationNone:
+		return nn.ActivationNone
+	case backends.ActivationGelu:
+		return nn.ActivationGelu
+	case backends.ActivationRelu:
+		return nn.ActivationRelu
+	case backends.ActivationSilu:
+		return nn.ActivationSilu
+	case backends.ActivationHardSwish:
+		return nn.ActivationHardSwish
+	case backends.ActivationTanh:
+		return nn.ActivationTanh
+	default:
+		return nn.ActivationNone
+	}
+}
+
 // backendToMatmulActivation converts a backends.ActivationType to the go-highway matmul.ActivationType.
 // Returns (matmulAct, ok). ok is false if the activation has no direct matmul equivalent (e.g. Tanh).
 func backendToMatmulActivation(act backends.ActivationType) (matmul.ActivationType, bool) {
@@ -649,9 +628,7 @@ func execDenseActivationHighway(backend *simplego.Backend, node *simplego.Node, 
 	outFeatures := weight.Shape().Dimensions[1]
 	batchSize := x.Shape().Size() / inFeatures
 
-	// Convert backends.ActivationType to nn.ActivationType.
-	// Both enums use the same iota ordering.
-	nnAct := nn.ActivationType(act)
+	nnAct := backendToNNActivation(act)
 
 	switch x.DType() {
 	case dtypes.Float32:

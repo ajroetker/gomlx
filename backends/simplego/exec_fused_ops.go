@@ -582,7 +582,11 @@ func sdpaGeneric[T float32 | float64](
 					scoreIdx++
 				}
 			}
-			invSum := 1.0 / sum
+			// Guard against all-masked rows: produce zeros instead of NaN.
+			var invSum T
+			if sum != 0 {
+				invSum = 1.0 / sum
+			}
 			scoreIdx = scoreIdxBase
 			for range kvLenUnmasked {
 				scores[scoreIdx] *= invSum

@@ -45,8 +45,8 @@ func execBinaryFloat16[OpFn func(a, b float32) float32](opFn OpFn, lhs, rhs []fl
 		return
 	} else {
 		// Case 3: with broadcasting non-scalar tensors:
-		lhsIter := newBroadcastIterator(lhsShape, outputShape)
-		rhsIter := newBroadcastIterator(rhsShape, outputShape)
+		lhsIter := NewBroadcastIterator(lhsShape, outputShape)
+		rhsIter := NewBroadcastIterator(rhsShape, outputShape)
 		for outputIdx := range output {
 			lhsIdx := lhsIter.Next()
 			rhsIdx := rhsIter.Next()
@@ -85,8 +85,8 @@ func execCompareFloat16[OpFn func(a, b float32) bool](opFn OpFn, lhs, rhs []floa
 		return
 	} else {
 		// Case 3: Broadcasting.
-		lhsIter := newBroadcastIterator(lhsShape, outputShape)
-		rhsIter := newBroadcastIterator(rhsShape, outputShape)
+		lhsIter := NewBroadcastIterator(lhsShape, outputShape)
+		rhsIter := NewBroadcastIterator(rhsShape, outputShape)
 		for outputIdx := range output {
 			lhsIdx := lhsIter.Next()
 			rhsIdx := rhsIter.Next()
@@ -106,7 +106,7 @@ func makeFloat16BinaryWrapper(
 		if inputs[0].shape.DType != dtypes.Float16 {
 			return origExec(backend, node, inputs, inputsOwned)
 		}
-		lhs, rhs, output, _, _ := binaryOperandsAndOutput(backend, inputs, inputsOwned, node.shape)
+		lhs, rhs, output, _, _ := BinaryOperandsAndOutput(backend, inputs, inputsOwned, node.shape)
 		execBinaryFloat16(opFn, lhs.flat.([]float16.Float16), rhs.flat.([]float16.Float16),
 			output.flat.([]float16.Float16), lhs.shape, rhs.shape, output.shape)
 		return output, nil

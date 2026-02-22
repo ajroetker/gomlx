@@ -22,8 +22,8 @@ func TestExecBinary_broadcastIterator(t *testing.T) {
 
 	// Simple [2, 3] shape broadcast simultaneously by 2 different tensors.
 	targetShape := S(2, 3)
-	bi1 := newBroadcastIterator(S(2, 1), targetShape)
-	bi2 := newBroadcastIterator(S(1, 3), targetShape)
+	bi1 := NewBroadcastIterator(S(2, 1), targetShape)
+	bi2 := NewBroadcastIterator(S(1, 3), targetShape)
 	indices1 := make([]int, 0, targetShape.Size())
 	indices2 := make([]int, 0, targetShape.Size())
 	for range targetShape.Size() {
@@ -36,7 +36,7 @@ func TestExecBinary_broadcastIterator(t *testing.T) {
 
 	// Alternating broadcast axes.
 	targetShape = S(3, 2, 4, 2)
-	b3 := newBroadcastIterator(S(3, 1, 4, 1), targetShape)
+	b3 := NewBroadcastIterator(S(3, 1, 4, 1), targetShape)
 	indices3 := make([]int, 0, targetShape.Size())
 	for range targetShape.Size() {
 		indices3 = append(indices3, b3.Next())

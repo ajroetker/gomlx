@@ -181,7 +181,7 @@ func execBroadcastInDimFloat16(params ...any) any {
 		xslices.FillSlice(outputFlat, operandFlat[0])
 		return nil
 	}
-	operandIter := operandIterAny.(*broadcastIterator)
+	operandIter := operandIterAny.(*BroadcastIterator)
 	for outputIdx := range outputFlat {
 		outputFlat[outputIdx] = operandFlat[operandIter.Next()]
 	}
