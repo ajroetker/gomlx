@@ -104,24 +104,24 @@ func execConvGeneralIm2Col(backend *Backend, node *Node, inputs []*Buffer, input
 	k := patchSize                     // columns (contracting dimension)
 
 	// Allocate im2col buffer: [M, K]. Reused across groups.
-	im2colBuf := backend.getBuffer(dtype, m*k)
-	if im2colBuf == nil {
-		return nil, errors.Errorf("failed allocating im2col buffer of size %d", m*k)
+	im2colBuf, err := backend.getBuffer(dtype, m*k)
+	if err != nil {
+		return nil, errors.Wrapf(err, "failed allocating im2col buffer of size %d", m*k)
 	}
 
 	// Allocate per-group matmul output: [M, outputChannelsPerGroup]. Reused across groups.
-	matmulOutBuf := backend.getBuffer(dtype, m*outputChannelsPerGroup)
-	if matmulOutBuf == nil {
+	matmulOutBuf, err := backend.getBuffer(dtype, m*outputChannelsPerGroup)
+	if err != nil {
 		backend.putBuffer(im2colBuf)
-		return nil, errors.Errorf("failed allocating matmul output buffer")
+		return nil, errors.Wrap(err, "failed allocating matmul output buffer")
 	}
 
 	// Allocate final output buffer: [batchSize, outputChannels, outputSpatial...].
-	output := backend.getBufferForShape(outputShape)
-	if output == nil {
+	output, err := backend.getBufferForShape(outputShape)
+	if err != nil {
 		backend.putBuffer(im2colBuf)
 		backend.putBuffer(matmulOutBuf)
-		return nil, errors.Errorf("failed allocating output buffer shaped %s", outputShape)
+		return nil, errors.Wrapf(err, "failed allocating output buffer shaped %s", outputShape)
 	}
 
 	for g := 0; g < groups; g++ {

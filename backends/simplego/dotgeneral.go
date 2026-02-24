@@ -10,7 +10,6 @@ import (
 	"strings"
 
 	"github.com/gomlx/gomlx/backends"
-	"github.com/gomlx/gomlx/backends/simplego/highway"
 	"github.com/gomlx/gomlx/backends/simplego/packgemm"
 	"github.com/gomlx/gomlx/pkg/core/dtypes"
 	"github.com/gomlx/gomlx/pkg/core/dtypes/bfloat16"
@@ -544,7 +543,11 @@ func execDotGeneral(backend *Backend, node *Node, inputs []*Buffer, _ []bool) (*
 			// Allocate buffer for transposed LHS
 			// Original shape is [batchSize, contractingSize, lhsCrossSize]
 			// We need [batchSize, lhsCrossSize, contractingSize]
-			lhsTransposed = backend.getBuffer(inputDType, params.batchSize*params.lhsCrossSize*params.contractingSize)
+			var err error
+			lhsTransposed, err = backend.getBuffer(inputDType, params.batchSize*params.lhsCrossSize*params.contractingSize)
+			if err != nil {
+				return nil, err
+			}
 			// Transpose each batch
 			batchStride := params.lhsCrossSize * params.contractingSize
 			for b := range params.batchSize {
@@ -563,7 +566,11 @@ func execDotGeneral(backend *Backend, node *Node, inputs []*Buffer, _ []bool) (*
 			// Allocate buffer for transposed RHS
 			// Original shape is [batchSize, rhsCrossSize, contractingSize]
 			// We need [batchSize, contractingSize, rhsCrossSize]
-			rhsTransposed = backend.getBuffer(inputDType, params.batchSize*params.rhsCrossSize*params.contractingSize)
+			var err error
+			rhsTransposed, err = backend.getBuffer(inputDType, params.batchSize*params.rhsCrossSize*params.contractingSize)
+			if err != nil {
+				return nil, err
+			}
 			// Transpose each batch
 			batchStride := params.rhsCrossSize * params.contractingSize
 			for b := range params.batchSize {

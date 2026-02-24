@@ -167,7 +167,7 @@ func dgNormalizeShape[T interface {
 		rank := source.shape.Rank()
 		if sourceDims[rank-2] == contractingSize && sourceDims[rank-1] == crossSize {
 			outputShape := shapes.Make(source.shape.DType, batchSize, crossSize, contractingSize)
-			output = backend.getBufferForShape(outputShape)
+			output, _ = backend.getBufferForShape(outputShape)
 			matrixSize := contractingSize * crossSize
 
 			// Try to transpose each batch using SIMD.

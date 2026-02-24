@@ -3,6 +3,8 @@
 package simplego
 
 import (
+	"fmt"
+
 	"github.com/gomlx/gomlx/backends"
 	"github.com/gomlx/gomlx/pkg/core/shapes"
 )
@@ -13,12 +15,20 @@ import (
 
 // FusedOpOutput allocates an output buffer for a fused op based on the node's output shape.
 func FusedOpOutput(backend *Backend, node *Node) *Buffer {
-	return backend.getBufferForShape(node.shape)
+	buf, err := backend.getBufferForShape(node.shape)
+	if err != nil {
+		panic(fmt.Sprintf("FusedOpOutput: %v", err))
+	}
+	return buf
 }
 
 // FusedOpOutputForShape allocates an output buffer for a given shape.
 func FusedOpOutputForShape(backend *Backend, shape shapes.Shape) *Buffer {
-	return backend.getBufferForShape(shape)
+	buf, err := backend.getBufferForShape(shape)
+	if err != nil {
+		panic(fmt.Sprintf("FusedOpOutputForShape: %v", err))
+	}
+	return buf
 }
 
 // FusedOpOutputShape returns the output shape for a fused op node.
@@ -62,9 +72,20 @@ func QKVProjectionParams(node *Node) (qDim, kvDim int, hasBiasQ, hasBiasK, hasBi
 // QKVProjectionOutputBuffers allocates the three output buffers (q, k, v) for a QKVProjection node.
 func QKVProjectionOutputBuffers(backend *Backend, node *Node) (q, k, v *Buffer) {
 	outShapes := node.multiOutputsShapes
-	return backend.getBufferForShape(outShapes[0]),
-		backend.getBufferForShape(outShapes[1]),
-		backend.getBufferForShape(outShapes[2])
+	var err error
+	q, err = backend.getBufferForShape(outShapes[0])
+	if err != nil {
+		panic(fmt.Sprintf("QKVProjectionOutputBuffers (q): %v", err))
+	}
+	k, err = backend.getBufferForShape(outShapes[1])
+	if err != nil {
+		panic(fmt.Sprintf("QKVProjectionOutputBuffers (k): %v", err))
+	}
+	v, err = backend.getBufferForShape(outShapes[2])
+	if err != nil {
+		panic(fmt.Sprintf("QKVProjectionOutputBuffers (v): %v", err))
+	}
+	return q, k, v
 }
 
 // QuantizedSDPAParams extracts the parameters from a FusedQuantizedScaledDotProductAttention node.
@@ -82,7 +103,11 @@ func QuantizedDenseParams(node *Node) (quantFormat backends.QuantFormat, groupSi
 // TransposeBuffer transposes a buffer according to the given axis permutation.
 // Used by the highway subpackage for transposing BSHD masks to BHSD layout.
 func TransposeBuffer(backend *Backend, buf *Buffer, permutations []int) *Buffer {
-	return transposeBuffer(backend, buf, permutations)
+	result, err := transposeBuffer(backend, buf, permutations)
+	if err != nil {
+		panic(fmt.Sprintf("TransposeBuffer: %v", err))
+	}
+	return result
 }
 
 // ApplyActivationFloat32 applies an activation function to float32 data in-place.

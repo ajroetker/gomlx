@@ -3,6 +3,7 @@
 package simplego
 
 import (
+	"fmt"
 	"math"
 	"math/bits"
 	"sync"
@@ -58,7 +59,12 @@ func unaryOperandAndOutput(backend *Backend, inputs []*Buffer, inputsOwned []boo
 // UnaryOperandAndOutput is the exported version of unaryOperandAndOutput for use by subpackages.
 // It returns the input buffer and an output buffer (which may be the same as input if inputsOwned[0] is true).
 func UnaryOperandAndOutput(backend *Backend, inputs []*Buffer, inputsOwned []bool) (input, output *Buffer) {
-	return unaryOperandAndOutput(backend, inputs, inputsOwned)
+	var err error
+	input, output, err = unaryOperandAndOutput(backend, inputs, inputsOwned)
+	if err != nil {
+		panic(fmt.Sprintf("UnaryOperandAndOutput: %v", err))
+	}
+	return input, output
 }
 
 // execNeg executes the unary op Neg.

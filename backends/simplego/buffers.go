@@ -4,6 +4,7 @@ package simplego
 
 import (
 	stderrors "errors"
+	"fmt"
 	"reflect"
 	"strings"
 	"sync"
@@ -157,7 +158,11 @@ func (b *Backend) getBufferForShape(shape shapes.Shape) (*Buffer, error) {
 // GetBuffer is the exported version of getBuffer for use by subpackages.
 // It returns an uninitialized buffer from the pool with the given dtype and length.
 func (b *Backend) GetBuffer(dtype dtypes.DType, length int) *Buffer {
-	return b.getBuffer(dtype, length)
+	buf, err := b.getBuffer(dtype, length)
+	if err != nil {
+		panic(fmt.Sprintf("GetBuffer: %v", err))
+	}
+	return buf
 }
 
 // // randomize fills the buffer with random bits -- useful for testing.

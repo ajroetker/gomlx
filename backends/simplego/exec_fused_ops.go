@@ -779,7 +779,10 @@ func execFusedQuantizedDense(backend *Backend, node *Node, inputs []*Buffer, inp
 		return nil, errors.Wrapf(backends.ErrNotImplemented, "FusedQuantizedDense: only float32 input supported, got %s", xBuf.shape.DType)
 	}
 
-	output := backend.getBufferForShape(node.shape)
+	output, err := backend.getBufferForShape(node.shape)
+	if err != nil {
+		return nil, err
+	}
 	x := xBuf.flat.([]float32)
 	scales := sBuf.flat.([]float32)
 	out := output.flat.([]float32)
@@ -901,10 +904,17 @@ func execFusedQuantizedScaledDotProductAttention(backend *Backend, node *Node, i
 	}
 
 	if data.axesLayout == backends.AxesLayoutBSHD && mask != nil && mask.shape.Rank() == 4 {
-		mask = transposeBuffer(backend, mask, []int{0, 2, 1, 3})
+		var err error
+		mask, err = transposeBuffer(backend, mask, []int{0, 2, 1, 3})
+		if err != nil {
+			return nil, err
+		}
 	}
 
-	output := backend.getBufferForShape(query.shape.Clone())
+	output, err := backend.getBufferForShape(query.shape.Clone())
+	if err != nil {
+		return nil, err
+	}
 
 	var maskBatchStride, maskHeadStride int
 	if mask != nil {
