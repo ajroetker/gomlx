@@ -519,7 +519,6 @@ func (e *Engine) addRequest(req *engineRequest) {
 			req.prefixLen = cachedTokens
 			req.hasPrefixHit = true
 			blocksNeeded = max(promptLen-cachedTokens+req.opts.MaxNewTokens, 1)
-
 		}
 
 		err := e.blockMgr.EnsureBlocks(req.id, blocksNeeded)

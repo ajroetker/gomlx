@@ -32,8 +32,8 @@ func newSlotManager(maxBatchSize int) *slotManager {
 	}
 }
 
-// Allocate assigns a slot to the given request ID. Returns the slot index.
-func (sm *slotManager) Allocate(reqID uint64) (int, error) {
+// Allocate assigns a free slot. Returns the slot index.
+func (sm *slotManager) Allocate(_ uint64) (int, error) {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 

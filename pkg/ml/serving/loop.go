@@ -222,16 +222,14 @@ func (e *Engine) finishRequest(req *engineRequest, err error) {
 	close(req.outputChan)
 	close(req.errChan)
 
-	// Reset incremental tokenizer state only in sequential mode.
-	// In batched mode, multiple requests share the tokenizer concurrently,
-	// so resetting here would corrupt other in-flight requests' multi-byte state.
-	if !e.batchedMode {
-		e.tokenizer.Reset()
-	}
-
-	// Free KV cache slot in batched mode.
 	if e.batchedMode {
+		// Free KV cache slot in batched mode.
 		e.slotMgr.Free(req.slot)
+	} else {
+		// Reset incremental tokenizer state only in sequential mode.
+		// In batched mode, multiple requests share the tokenizer concurrently,
+		// so resetting here would corrupt other in-flight requests' multi-byte state.
+		e.tokenizer.Reset()
 	}
 
 	// Free paged KV cache blocks (non-prefix blocks only -- prefix blocks

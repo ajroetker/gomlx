@@ -71,17 +71,25 @@ func (bm *BlockManager) AllocateBlocks(requestID uint64, n int) ([]int, error) {
 	bm.mu.Lock()
 	defer bm.mu.Unlock()
 
-	if len(bm.freeBlocks) < n {
-		return nil, ErrNoFreeBlocks
-	}
-
-	allocated := make([]int, n)
-	for i := range n {
-		allocated[i] = bm.freeBlocks[len(bm.freeBlocks)-1]
-		bm.freeBlocks = bm.freeBlocks[:len(bm.freeBlocks)-1]
+	allocated, err := bm.popFreeBlocksLocked(n)
+	if err != nil {
+		return nil, err
 	}
 
 	bm.pageTable[requestID] = append(bm.pageTable[requestID], allocated...)
+	return allocated, nil
+}
+
+// popFreeBlocksLocked pops n blocks from the free stack.
+// Caller must hold bm.mu.
+func (bm *BlockManager) popFreeBlocksLocked(n int) ([]int, error) {
+	if len(bm.freeBlocks) < n {
+		return nil, ErrNoFreeBlocks
+	}
+	start := len(bm.freeBlocks) - n
+	allocated := make([]int, n)
+	copy(allocated, bm.freeBlocks[start:])
+	bm.freeBlocks = bm.freeBlocks[:start]
 	return allocated, nil
 }
 
@@ -135,15 +143,9 @@ func (bm *BlockManager) EnsureBlocks(requestID uint64, seqLen int) error {
 		return nil
 	}
 
-	toAllocate := needed - current
-	if len(bm.freeBlocks) < toAllocate {
-		return ErrNoFreeBlocks
-	}
-
-	allocated := make([]int, toAllocate)
-	for i := range toAllocate {
-		allocated[i] = bm.freeBlocks[len(bm.freeBlocks)-1]
-		bm.freeBlocks = bm.freeBlocks[:len(bm.freeBlocks)-1]
+	allocated, err := bm.popFreeBlocksLocked(needed - current)
+	if err != nil {
+		return err
 	}
 	bm.pageTable[requestID] = append(bm.pageTable[requestID], allocated...)
 	return nil
@@ -331,8 +333,7 @@ func PagedKVCacheWriteBatched(ctx *context.Context, g *Graph, config PagedKVCach
 		// Get this batch element's position and page table.
 		pos := Reshape(Slice(posI32, AxisElem(b)))
 
-		batchPageTable := Slice(pageTables, AxisElem(b), AxisRange())
-		batchPageTable = Reshape(batchPageTable, batchPageTable.Shape().Dimensions[len(batchPageTable.Shape().Dimensions)-1])
+		batchPageTable := Squeeze(Slice(pageTables, AxisElem(b), AxisRange()), 0)
 
 		// Extract this batch element's key/value: [1, numKVHeads, 1, headDim]
 		batchKey := Slice(newKeys, AxisElem(b), AxisRange(), AxisRange(), AxisRange())

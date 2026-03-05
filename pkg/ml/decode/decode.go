@@ -379,41 +379,55 @@ func (dec *Decoder) Decode(
 	}
 
 	promptTensor := tensors.FromAnyValue(prompt)
-	if promptTensor.Rank() == 1 {
-		// Reshape is not a method on Tensor, so we need to work with the shape
-		// For now, we'll use the prompt as-is in the graph
-	}
-	if promptTensor.Rank() != 2 && promptTensor.Rank() != 1 {
+	if promptTensor.Rank() != 1 && promptTensor.Rank() != 2 {
 		return nil, errors.Errorf("prompt must be 1D or 2D, got rank %d", promptTensor.Rank())
 	}
 
+	// Determine promptLen (last dimension regardless of rank).
 	promptShape := promptTensor.Shape()
-	var promptLen int
-	if promptTensor.Rank() == 1 {
-		promptLen = promptShape.Dimensions[0]
-	} else {
-		promptLen = promptShape.Dimensions[1]
-	}
+	promptLen := promptShape.Dimensions[promptTensor.Rank()-1]
 
 	if promptLen >= dec.MaxLength {
 		return nil, errors.Errorf("prompt length %d >= max length %d", promptLen, dec.MaxLength)
 	}
 
-	if dec.Strategy == sample.StrategyBeamSearch {
-		return dec.generateBeamSearch(backend, ctx, promptTensor)
+	// Reshape 1D to 2D with batch size 1 so downstream functions always get [batch, seqLen].
+	var batchSize int
+	if promptTensor.Rank() == 1 {
+		reshapeExec, err := context.NewExec(backend, ctx.Reuse(), func(ctx *context.Context, input *Node) *Node {
+			return ExpandDims(input, 0) // [seqLen] -> [1, seqLen]
+		})
+		if err != nil {
+			return nil, errors.WithMessagef(err, "failed to create reshape exec")
+		}
+		reshapeResults, err := reshapeExec.Exec(promptTensor)
+		if err != nil {
+			return nil, errors.WithMessagef(err, "failed to reshape prompt")
+		}
+		promptTensor = reshapeResults[0]
+		batchSize = 1
+	} else {
+		batchSize = promptShape.Dimensions[0]
 	}
 
-	// Regular sampling-based generation
-	return dec.generateSampling(backend, ctx, promptTensor)
+	if dec.Strategy == sample.StrategyBeamSearch {
+		return dec.generateBeamSearch(backend, ctx, promptTensor, batchSize, promptLen)
+	}
+
+	// Regular sampling-based generation.
+	return dec.generateSampling(backend, ctx, promptTensor, batchSize, promptLen)
 }
 
 // generateSampling performs generation using sampling strategies.
 // Handles both cached and non-cached generation.
+// The prompt must be 2D [batch, seqLen], already reshaped and validated by Decode.
 //
 // Parameters:
 //   - backend: Backend for computation
 //   - ctx: Context containing model parameters
-//   - prompt: Input token sequence [seqLen] or [batch, seqLen]
+//   - prompt: Input token sequence [batch, seqLen]
+//   - batchSize: Number of sequences in the batch
+//   - promptLen: Length of the prompt sequence
 //
 // Returns:
 //   - Generated sequence [batch, totalLen] where totalLen <= MaxLength
@@ -422,35 +436,8 @@ func (dec *Decoder) generateSampling(
 	backend backends.Backend,
 	ctx *context.Context,
 	prompt *tensors.Tensor,
+	batchSize, promptLen int,
 ) (*tensors.Tensor, error) {
-	promptShape := prompt.Shape()
-	var batchSize, promptLen int
-
-	if prompt.Rank() == 1 {
-		// Reshape 1D to 2D with batch size 1
-		reshapeExec, err := context.NewExec(backend, ctx.Reuse(), func(ctx *context.Context, input *Node) *Node {
-			return ExpandDims(input, 0) // [seq_len] -> [1, seq_len]
-		})
-		if err != nil {
-			return nil, errors.WithMessagef(err, "failed to create reshape exec")
-		}
-
-		reshapeResults, err := reshapeExec.Exec(prompt)
-		if err != nil {
-			return nil, errors.WithMessagef(err, "failed to reshape prompt")
-		}
-		prompt = reshapeResults[0]
-		batchSize = 1
-		promptLen = promptShape.Dimensions[0]
-	} else {
-		batchSize = promptShape.Dimensions[0]
-		promptLen = promptShape.Dimensions[1]
-	}
-
-	if promptLen >= dec.MaxLength {
-		return nil, errors.Errorf("prompt length %d >= max length %d", promptLen, dec.MaxLength)
-	}
-
 	if dec.isCached() {
 		return dec.generateSamplingIncremental(backend, ctx, prompt, batchSize, promptLen)
 	}
@@ -696,40 +683,13 @@ func (dec *Decoder) checkEOS(token *tensors.Tensor) bool {
 
 // generateBeamSearch performs beam search generation.
 // Dispatches to cached or non-cached implementation based on configuration.
+// The prompt must be 2D [batch, seqLen] and length-validated by the caller (Decode).
 func (dec *Decoder) generateBeamSearch(
 	backend backends.Backend,
 	ctx *context.Context,
 	prompt *tensors.Tensor,
+	batchSize, promptLen int,
 ) (*tensors.Tensor, error) {
-	// Ensure prompt 2D
-	promptShape := prompt.Shape()
-	var batchSize, promptLen int
-
-	if prompt.Rank() == 1 {
-		reshapeExec, err := context.NewExec(backend, ctx.Reuse(), func(ctx *context.Context, input *Node) *Node {
-			return ExpandDims(input, 0)
-		})
-		if err != nil {
-			return nil, errors.WithMessagef(err, "failed to create reshape exec")
-		}
-
-		reshapeResults, err := reshapeExec.Exec(prompt)
-		if err != nil {
-			return nil, errors.WithMessagef(err, "failed to reshape prompt")
-		}
-		prompt = reshapeResults[0]
-		batchSize = 1
-		promptLen = promptShape.Dimensions[0]
-	} else {
-		batchSize = promptShape.Dimensions[0]
-		promptLen = promptShape.Dimensions[1]
-	}
-
-	if promptLen >= dec.MaxLength {
-		return nil, errors.Errorf("prompt length %d >= max length %d", promptLen, dec.MaxLength)
-	}
-
-	// Dispatch cached or non-cached
 	if dec.isCached() {
 		return dec.generateBeamSearchCached(backend, ctx, prompt, batchSize, promptLen)
 	}
