@@ -173,7 +173,7 @@ func (pc *PrefixCache) decrementBlocksLocked(blocks []int) []int {
 			continue // already freed or never tracked — skip to avoid underflow
 		}
 		pc.refCounts[b] = count - 1
-		if count-1 <= 0 {
+		if count == 1 {
 			delete(pc.refCounts, b)
 			freed = append(freed, b)
 		}
