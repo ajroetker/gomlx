@@ -3,8 +3,8 @@
 // gemma3 demonstrates ONNX-based text generation using GoMLX's serving engine.
 //
 // It downloads the onnx-community/gemma-3-270m-it-ONNX model from HuggingFace,
-// wraps it in an IncrementalModelFn, and uses the serving engine for
-// autoregressive generation with KV cache management.
+// wraps it in a ModelFn, and uses the serving engine for autoregressive
+// generation with KV cache management.
 //
 // Usage:
 //
@@ -162,14 +162,15 @@ func main() {
 		attention.KVCacheGetVars(layerCtx, cacheShape)
 	}
 
-	// Wrap the ONNX model as an IncrementalModelFn for the serving engine.
-	modelFn := makeIncrementalModelFn(model, kv, maxSeqLen, hasAttentionMask, hasPositionIDs)
+	// Wrap the ONNX model as a ModelFn for the serving engine.
+	modelFn := makeModelFn(model, kv, maxSeqLen, hasAttentionMask, hasPositionIDs)
 
 	// Create the serving engine.
 	tokWrapper := &servingTokenizer{tok: tok, eosID: eosID, endOfTurnID: endOfTurnID}
-	eng := serving.New(backend, ctx, modelFn, tokWrapper, serving.Config{
-		MaxSeqLen: maxSeqLen,
-	})
+	eng := serving.NewEngine(backend, ctx, modelFn, tokWrapper, serving.Config{
+		MaxSeqLen:    maxSeqLen,
+		MaxBatchSize: 1, // ONNX model with explicit KV I/O supports batch=1
+	}, kv.kvHeads, kv.headDim, kv.kvDType)
 	defer eng.Stop()
 
 	// Generation loop.
@@ -280,23 +281,24 @@ func (t *servingTokenizer) IsEOS(tokenID int32) bool {
 
 func (t *servingTokenizer) Reset() {}
 
-// makeIncrementalModelFn wraps an ONNX model with explicit KV I/O into an
-// IncrementalModelFn for the serving engine.
+// makeModelFn wraps an ONNX model with explicit KV I/O into a ModelFn for
+// the serving engine.
 //
 // The ONNX model expects past KV as inputs (past_key_values.{i}.key/value) and
 // returns present KV as outputs (present.{i}.key/value). This wrapper bridges
-// that to the serving engine's context-variable KV pattern by:
-//   - Prefill (position=0): feeding empty KV constants, writing full present KV
+// that to the ModelFn pattern by:
+//   - Prefill (seqLen > 1): feeding empty KV constants, writing full present KV
 //     to context variables
-//   - Decode (position>0): slicing past KV from context variables, feeding to
-//     ONNX, extracting the new token's KV from the output and writing it back
+//   - Decode (seqLen == 1): feeding the full padded KV cache with a dynamic
+//     attention mask, extracting the new token's KV and writing at position
 //
-// Position is a compile-time Go int, enabling static slicing of the fixed-size
-// KV cache context variables.
-func makeIncrementalModelFn(
+// Positions are tensor parameters, enabling O(1) compiled executors for decode.
+// The KVCacheAccessor parameter is unused since the ONNX model manages its own
+// KV cache through explicit input/output tensors.
+func makeModelFn(
 	model *onnx.Model, kv *kvStructure,
 	maxSeqLen int, hasAttentionMask, hasPositionIDs bool,
-) decode.IncrementalModelFn {
+) decode.ModelFn {
 	// Prepare empty KV constants for prefill (no past).
 	emptyKV := make(map[string]any)
 	for i := range kv.numLayers {
@@ -307,7 +309,7 @@ func makeIncrementalModelFn(
 	// Fixed cache shape for context variables: [1, kvHeads, maxSeqLen, headDim].
 	cacheShape := shapes.Make(kv.kvDType, 1, kv.kvHeads, maxSeqLen, kv.headDim)
 
-	return func(ctx *context.Context, newTokens *Node, position int) *Node {
+	return func(ctx *context.Context, newTokens *Node, positions *Node, _ attention.KVCacheAccessor) *Node {
 		g := newTokens.Graph()
 		seqLen := newTokens.Shape().Dimensions[1]
 
@@ -329,36 +331,48 @@ func makeIncrementalModelFn(
 			valCaches[i] = valVars[i].ValueGraph(g)
 		}
 
-		// Build ONNX past_key_values inputs.
-		if position == 0 {
-			// Prefill: set empty KV as constants (no past).
+		// Position as int64 for building position_ids and attention_mask.
+		posI64 := ConvertDType(positions, dtypes.Int64) // [batchSize=1]
+
+		if seqLen > 1 {
+			// --- Prefill path ---
+			// Feed empty KV constants (no past).
 			model.WithInputsAsConstants(emptyKV)
+
+			if hasAttentionMask {
+				inputs["attention_mask"] = Ones(g, shapes.Make(dtypes.Int64, 1, seqLen))
+			}
+			if hasPositionIDs {
+				// Sequential positions from offset (normally 0 for fresh requests).
+				posOffset := Reshape(posI64, 1, 1)
+				inputs["position_ids"] = Add(Iota(g, shapes.Make(dtypes.Int64, 1, seqLen), 1), posOffset)
+			}
 		} else {
-			// Decode: read past KV from context variables and feed to ONNX.
+			// --- Decode path (seqLen == 1) ---
+			// Feed the full padded KV cache. Invalid positions are masked out
+			// by the attention mask, enabling O(1) compilation (shapes are fixed
+			// regardless of position).
 			model.WithInputsAsConstants(nil)
 			for i := range kv.numLayers {
-				inputs[kv.inputKeyNames[i]] = Slice(keyCaches[i], AxisRange(), AxisRange(), AxisRange(0, position), AxisRange())
-				inputs[kv.inputValueNames[i]] = Slice(valCaches[i], AxisRange(), AxisRange(), AxisRange(0, position), AxisRange())
+				inputs[kv.inputKeyNames[i]] = keyCaches[i]
+				inputs[kv.inputValueNames[i]] = valCaches[i]
 			}
-		}
 
-		// Build attention mask: all-ones of length (position + seqLen).
-		if hasAttentionMask {
-			totalLen := position + seqLen
-			maskData := make([]int64, totalLen)
-			for j := range totalLen {
-				maskData[j] = 1
+			if hasAttentionMask {
+				// Mask: [1, maxSeqLen + 1] — past positions [0, pos) + current token.
+				// The ONNX model sees past_seq_len=maxSeqLen (padded), so total
+				// attention length is maxSeqLen + 1 (past + current).
+				totalLen := maxSeqLen + 1
+				idx := Iota(g, shapes.Make(dtypes.Int64, 1, totalLen), 1)
+				posExpanded := Reshape(posI64, 1, 1)
+				pastValid := LessThan(idx, posExpanded)
+				currentValid := Equal(idx, ConstAs(idx, int64(maxSeqLen)))
+				validMask := Or(pastValid, currentValid)
+				inputs["attention_mask"] = Where(validMask, OnesLike(idx), ZerosLike(idx))
 			}
-			inputs["attention_mask"] = Const(g, [][]int64{maskData})
-		}
-
-		// Build position IDs.
-		if hasPositionIDs {
-			posData := make([]int64, seqLen)
-			for j := range seqLen {
-				posData[j] = int64(position + j)
+			if hasPositionIDs {
+				inputs["position_ids"] = Reshape(posI64, 1, 1)
 			}
-			inputs["position_ids"] = Const(g, [][]int64{posData})
 		}
 
 		// Run ONNX model.
@@ -371,18 +385,19 @@ func makeIncrementalModelFn(
 			presentKey := allOutputs[kv.outputKeyIndices[i]]
 			presentVal := allOutputs[kv.outputValueIndices[i]]
 
-			if position == 0 {
+			if seqLen > 1 {
 				// Prefill: write all prompt KV at the start of the cache.
 				keyCaches[i] = DynamicUpdateSlice(keyCaches[i], presentKey, []*Node{zero, zero, zero, zero})
 				valCaches[i] = DynamicUpdateSlice(valCaches[i], presentVal, []*Node{zero, zero, zero, zero})
 			} else {
-				// Decode: extract new token's KV and insert at position.
-				newKey := Slice(presentKey, AxisRange(), AxisRange(), AxisRange(position, position+1), AxisRange())
-				newVal := Slice(presentVal, AxisRange(), AxisRange(), AxisRange(position, position+1), AxisRange())
+				// Decode: present output is [1, heads, maxSeqLen+1, dim].
+				// New token's KV is at the last position (index maxSeqLen).
+				newKey := Slice(presentKey, AxisRange(), AxisRange(), AxisRange(maxSeqLen, maxSeqLen+1), AxisRange())
+				newVal := Slice(presentVal, AxisRange(), AxisRange(), AxisRange(maxSeqLen, maxSeqLen+1), AxisRange())
 
-				posNode := Const(g, int32(position))
-				keyCaches[i] = DynamicUpdateSlice(keyCaches[i], newKey, []*Node{zero, zero, posNode, zero})
-				valCaches[i] = DynamicUpdateSlice(valCaches[i], newVal, []*Node{zero, zero, posNode, zero})
+				posI32 := Reshape(Slice(ConvertDType(positions, dtypes.Int32), AxisElem(0)))
+				keyCaches[i] = DynamicUpdateSlice(keyCaches[i], newKey, []*Node{zero, zero, posI32, zero})
+				valCaches[i] = DynamicUpdateSlice(valCaches[i], newVal, []*Node{zero, zero, posI32, zero})
 			}
 
 			keyVars[i].SetValueGraph(keyCaches[i])
