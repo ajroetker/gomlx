@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/gomlx/gomlx/backends"
+	"github.com/gomlx/gomlx/pkg/core/dtypes"
 	. "github.com/gomlx/gomlx/pkg/core/graph"
 	mlctx "github.com/gomlx/gomlx/pkg/ml/context"
 	"github.com/gomlx/gomlx/pkg/ml/decode"
@@ -84,8 +85,12 @@ type Engine struct {
 	modelCtx  *mlctx.Context
 	modelFn   decode.IncrementalModelFn // Phase 1 sequential model
 	batchedFn decode.BatchedModelFn     // Phase 2 batched model
+	unifiedFn decode.ModelFn            // Unified model with engine-controlled KV cache
 	tokenizer Tokenizer
 	config    Config
+
+	// KV cache config for unified mode (numKVHeads, headDim, maxSeqLen, dtype).
+	unifiedKVConfig *decode.KVCacheConfig
 
 	// Batched mode infrastructure.
 	batchedMode bool
@@ -214,6 +219,63 @@ func NewPaged(
 	e.blockMgr = attention.NewBlockManager(pagedCfg)
 	e.pagedCfg = pagedCfg
 	e.prefixCache = attention.NewPrefixCache(0)
+
+	e.wg.Add(1)
+	go e.runStepLoop()
+	return e
+}
+
+// NewEngine creates a batched Engine using a unified ModelFn with
+// engine-controlled KV cache. This enables O(1) compiled executors
+// (positions are tensor parameters) and transparent KV cache management.
+//
+// Parameters:
+//   - backend: Backend for computation.
+//   - ctx: Model context containing weights.
+//   - modelFn: A ModelFn that accepts positions as tensors and a KVCacheAccessor.
+//   - tokenizer: Tokenizer for output decoding and EOS detection.
+//   - config: Engine configuration.
+//   - numKVHeads: Number of key/value attention heads.
+//   - headDim: Dimension of each attention head.
+//   - cacheDType: Data type for KV cache entries.
+func NewEngine(
+	backend backends.Backend,
+	ctx *mlctx.Context,
+	modelFn decode.ModelFn,
+	tokenizer Tokenizer,
+	config Config,
+	numKVHeads, headDim int,
+	cacheDType dtypes.DType,
+) *Engine {
+	config.applyDefaults()
+
+	e := &Engine{
+		backend:                backend,
+		modelCtx:               ctx,
+		unifiedFn:              modelFn,
+		tokenizer:              tokenizer,
+		config:                 config,
+		batchedMode:            true,
+		slotMgr:                newSlotManager(config.MaxBatchSize),
+		sched:                  newScheduler(config.MaxBatchSize),
+		requests:               make(map[uint64]*engineRequest),
+		batchedDecodeExecCache: make(map[int]*mlctx.Exec),
+		submitCh:               make(chan *engineRequest, config.SubmitQueueSize),
+		stopCh:                 make(chan struct{}),
+		unifiedKVConfig: &decode.KVCacheConfig{
+			NumKVHeads: numKVHeads,
+			HeadDim:    headDim,
+			MaxSeqLen:  config.MaxSeqLen,
+			DType:      cacheDType,
+		},
+	}
+
+	if config.Preemption != nil {
+		e.preemptMgr = newPreemptionManager(*config.Preemption)
+	}
+	if config.Speculative != nil {
+		e.specConfig = config.Speculative
+	}
 
 	e.wg.Add(1)
 	go e.runStepLoop()
@@ -425,15 +487,28 @@ func (e *Engine) initBatchedPromptExec() error {
 	}
 
 	var err error
-	e.batchedPromptExec, err = mlctx.NewExec(e.backend, e.modelCtx.Reuse(),
-		func(ctx *mlctx.Context, tokens *Node, positions *Node) *Node {
-			logits := e.batchedFn(ctx, tokens, positions)
-			// Extract last-token logits: [1, seqLen, vocab] -> [1, vocab]
-			lastLogits := Slice(logits, AxisRange(), AxisElem(-1), AxisRange())
-			lastLogits = Squeeze(lastLogits, 1)
-			return lastLogits
-		},
-	)
+	if e.unifiedFn != nil {
+		cfg := e.unifiedKVConfig
+		e.batchedPromptExec, err = mlctx.NewExec(e.backend, e.modelCtx.Reuse(),
+			func(ctx *mlctx.Context, tokens *Node, positions *Node) *Node {
+				bs := tokens.Shape().Dimensions[0]
+				kv := attention.NewFlatKVCacheAccessor(bs, cfg.NumKVHeads, cfg.MaxSeqLen, cfg.HeadDim, cfg.DType, positions)
+				logits := e.unifiedFn(ctx, tokens, positions, kv)
+				lastLogits := Slice(logits, AxisRange(), AxisElem(-1), AxisRange())
+				lastLogits = Squeeze(lastLogits, 1)
+				return lastLogits
+			},
+		)
+	} else {
+		e.batchedPromptExec, err = mlctx.NewExec(e.backend, e.modelCtx.Reuse(),
+			func(ctx *mlctx.Context, tokens *Node, positions *Node) *Node {
+				logits := e.batchedFn(ctx, tokens, positions)
+				lastLogits := Slice(logits, AxisRange(), AxisElem(-1), AxisRange())
+				lastLogits = Squeeze(lastLogits, 1)
+				return lastLogits
+			},
+		)
+	}
 	return err
 }
 
@@ -448,17 +523,30 @@ func (e *Engine) getBatchedDecodeExec(paddedBatch int) (*mlctx.Exec, error) {
 		return exec, nil
 	}
 
-	exec, err := mlctx.NewExec(e.backend, e.modelCtx.Reuse(),
-		func(ctx *mlctx.Context, tokens *Node, positions *Node) *Node {
-			logits := e.batchedFn(ctx, tokens, positions)
-			// logits: [paddedBatch, 1, vocab] -> [paddedBatch, vocab]
-			lastLogits := Squeeze(logits, 1)
-
-			// GPU-side greedy sampling: argmax per batch element.
-			sampled := sample.Greedy(lastLogits)
-			return sampled // [paddedBatch] int32
-		},
-	)
+	var exec *mlctx.Exec
+	var err error
+	if e.unifiedFn != nil {
+		cfg := e.unifiedKVConfig
+		exec, err = mlctx.NewExec(e.backend, e.modelCtx.Reuse(),
+			func(ctx *mlctx.Context, tokens *Node, positions *Node) *Node {
+				bs := tokens.Shape().Dimensions[0]
+				kv := attention.NewFlatKVCacheAccessor(bs, cfg.NumKVHeads, cfg.MaxSeqLen, cfg.HeadDim, cfg.DType, positions)
+				logits := e.unifiedFn(ctx, tokens, positions, kv)
+				lastLogits := Squeeze(logits, 1)
+				sampled := sample.Greedy(lastLogits)
+				return sampled
+			},
+		)
+	} else {
+		exec, err = mlctx.NewExec(e.backend, e.modelCtx.Reuse(),
+			func(ctx *mlctx.Context, tokens *Node, positions *Node) *Node {
+				logits := e.batchedFn(ctx, tokens, positions)
+				lastLogits := Squeeze(logits, 1)
+				sampled := sample.Greedy(lastLogits)
+				return sampled
+			},
+		)
+	}
 	if err != nil {
 		return nil, err
 	}

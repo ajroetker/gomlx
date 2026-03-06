@@ -841,3 +841,122 @@ func TestPrefixCacheIntegration(t *testing.T) {
 		t.Errorf("Expected 2 prefix cache entries, got %d", eng.prefixCache.NumEntries())
 	}
 }
+
+// --- NewEngine Tests ---
+
+// makeConstantModelFn creates a ModelFn that always returns logits
+// where token ID `outputToken` has the highest value.
+func makeConstantModelFn(vocabSize int, outputToken int32) decode.ModelFn {
+	return func(ctx *mlctx.Context, tokens *Node, positions *Node, kv attention.KVCacheAccessor) *Node {
+		g := tokens.Graph()
+		batchSize := tokens.Shape().Dimensions[0]
+		seqLen := tokens.Shape().Dimensions[1]
+
+		logits := Zeros(g, shapes.Make(dtypes.Float32, batchSize, seqLen, vocabSize))
+
+		if outputToken != 0 {
+			logits = AddScalar(logits, -1.0)
+			oneHot := OneHot(Const(g, outputToken), vocabSize, dtypes.Float32)
+			oneHot = MulScalar(oneHot, 11.0)
+			oneHot = BroadcastPrefix(oneHot, batchSize, seqLen)
+			logits = Add(logits, oneHot)
+		}
+		return logits
+	}
+}
+
+func setupNewEngine(t *testing.T, modelFn decode.ModelFn, eosToken int32) *Engine {
+	t.Helper()
+	backend, err := simplego.New("")
+	if err != nil {
+		t.Fatalf("Failed to create backend: %v", err)
+	}
+	ctx := mlctx.New()
+	tok := &mockTokenizer{eosID: eosToken}
+	config := DefaultConfig()
+	config.MaxSeqLen = 128
+	config.MaxBatchSize = 4
+	return NewEngine(backend, ctx, modelFn, tok, config, 1, 4, dtypes.Float32)
+}
+
+func TestNewEngineSubmitAndReceive(t *testing.T) {
+	vocabSize := 10
+	outputToken := int32(3)
+	engine := setupNewEngine(t, makeConstantModelFn(vocabSize, outputToken), -1)
+	defer engine.Stop()
+
+	maxTokens := 5
+	outCh, errCh, err := engine.Submit(
+		context.Background(),
+		[]int32{1},
+		RequestOptions{MaxNewTokens: maxTokens, Strategy: sample.StrategyGreedy},
+	)
+	if err != nil {
+		t.Fatalf("Submit failed: %v", err)
+	}
+
+	var deltas []SequenceDelta
+	for d := range outCh {
+		deltas = append(deltas, d)
+	}
+
+	for err := range errCh {
+		t.Fatalf("Unexpected error: %v", err)
+	}
+
+	if len(deltas) != maxTokens {
+		t.Fatalf("Expected %d deltas, got %d", maxTokens, len(deltas))
+	}
+
+	for i, d := range deltas {
+		if d.TokenID != outputToken {
+			t.Errorf("Delta %d: expected token %d, got %d", i, outputToken, d.TokenID)
+		}
+	}
+}
+
+func TestNewEngineConcurrentSubmit(t *testing.T) {
+	vocabSize := 10
+	engine := setupNewEngine(t, makeConstantModelFn(vocabSize, 5), -1)
+	defer engine.Stop()
+
+	numRequests := 4
+	maxTokens := 3
+
+	var wg sync.WaitGroup
+	errors := make(chan error, numRequests)
+
+	for i := range numRequests {
+		wg.Go(func() {
+			outCh, errCh, err := engine.Submit(
+				context.Background(),
+				[]int32{int32(i + 1)},
+				RequestOptions{MaxNewTokens: maxTokens, Strategy: sample.StrategyGreedy},
+			)
+			if err != nil {
+				errors <- err
+				return
+			}
+
+			count := 0
+			for range outCh {
+				count++
+			}
+			for err := range errCh {
+				errors <- err
+				return
+			}
+
+			if count != maxTokens {
+				errors <- fmt.Errorf("expected %d tokens, got %d", maxTokens, count)
+			}
+		})
+	}
+
+	wg.Wait()
+	close(errors)
+
+	for err := range errors {
+		t.Errorf("Concurrent request error: %v", err)
+	}
+}
