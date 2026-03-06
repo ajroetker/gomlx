@@ -150,6 +150,13 @@ type ExecGraphFnOneOutput interface {
 //
 // For safety concerns, the cache of JIT-compiled graphs for different input shapes is limited.
 // It can be set or disabled with SetMaxCache.
+//
+// # Concurrency
+//
+// context.Exec inherits concurrent graph compilation from graph.Exec. The provided
+// ctxGraphFn must be safe for concurrent invocation — each call receives its own Graph
+// and Node arguments, but ctxGraphFn must not mutate external shared state without its
+// own synchronization.
 type Exec struct {
 	backend backends.Backend
 	context *Context
@@ -167,6 +174,10 @@ type Exec struct {
 	// as extra outputs.
 	changedVars   map[graph.GraphId][]*Variable
 	muChangedVars sync.Mutex
+
+	// reuseOnce ensures the context is marked for reuse exactly once,
+	// safe for concurrent graph compilations.
+	reuseOnce sync.Once
 
 	// isInitializeVariablesExec indicates this executor is being used to initialize variables.
 	// Initializing variables within the cxtGraphFn would lead to an infinite recursion.
@@ -352,9 +363,9 @@ func (e *Exec) buildGraphFn() {
 		results = []reflect.Value{reflect.ValueOf(allValues)}
 
 		// Mark context for reuse after the first time it is used.
-		if !e.context.reuse {
+		e.reuseOnce.Do(func() {
 			e.context = e.context.Reuse()
-		}
+		})
 		return
 	}).Interface()
 }
@@ -709,6 +720,17 @@ func (e *Exec) Name() string {
 // It returns a reference to itself so calls can be cascaded.
 func (e *Exec) SetMaxCache(maxCacheSize int) *Exec {
 	e.exec.SetMaxCache(maxCacheSize)
+	return e
+}
+
+// WithDynamicAxes configures which axes of inputs are dynamic. Each element
+// of axisNames provides the axis names for the corresponding input parameter.
+// Empty string "" means a static axis; a non-empty name marks a dynamic axis.
+// When set, the graph is compiled once with symbolic shapes and specialized
+// per concrete axis binding at execution time.
+// It returns a reference to itself so calls can be cascaded.
+func (e *Exec) WithDynamicAxes(axisNames ...[]string) *Exec {
+	e.exec.WithDynamicAxes(axisNames...)
 	return e
 }
 

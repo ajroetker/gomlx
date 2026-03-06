@@ -210,22 +210,30 @@ type Exec struct {
 	setSideParams SideParamsFn
 	loggerFn      LoggerFn
 
+	// dynamicAxes configures which axes of inputs are dynamic.
+	// dynamicAxes[i] provides axis names for input i. Empty string "" means static axis.
+	// When set, the graph is compiled once with symbolic shapes and
+	// specialized per concrete axis binding at execution time.
+	dynamicAxes [][]string
+
+
 	// Protects cache structure, pending map, and finalized flag.
 	cacheMu   sync.Mutex
 	cache     []*execGraphCacheEntry
 	finalized bool // set by Finalize; prevents new compilations
 
 	// pending tracks in-flight compilations so concurrent callers wait
-	// rather than duplicating work. Key is a shapes string, value is a
-	// channel closed when compilation finishes.
-	pending map[string]*pendingCompilation
+	// rather than duplicating work. Uses linear search like cache, since
+	// the number of concurrent compilations is expected to be small.
+	pending []*pendingCompilation
 }
 
 // pendingCompilation tracks an in-flight graph compilation.
 type pendingCompilation struct {
-	done  chan struct{}         // closed when compilation finishes
-	entry *execGraphCacheEntry // result (nil if failed)
-	err   error                // compilation error, if any
+	argsShapes []shapes.Shape       // shapes being compiled
+	done       chan struct{}         // closed when compilation finishes
+	entry      *execGraphCacheEntry // result (nil if failed)
+	err        error                // compilation error, if any
 }
 
 // execGraphCacheEntry: no hashing, just a simple list. This is faster
@@ -408,6 +416,38 @@ func (e *Exec) AutoSharding(meshes ...*distributed.DeviceMesh) *Exec {
 // It returns nil if no meshes were provided (e.g., for non-distributed execution).
 func (e *Exec) Meshes() []*distributed.DeviceMesh {
 	return e.meshes
+}
+
+// WithDynamicAxes configures which axes of inputs are dynamic.
+//
+// Each element of axisNames provides axis names for the corresponding input parameter.
+// An empty string "" within an axis names slice means that axis is static.
+// A non-empty name means that axis is dynamic and will be resolved from the
+// concrete input shape at execution time.
+//
+// When set, the graph is compiled once with symbolic shapes (dimensions set to
+// shapes.DynamicDim for named axes). At execution time, the backend extracts
+// axis bindings from the concrete inputs and uses a cached ShapeSpecialization
+// with resolved shapes. This avoids recompilation when only the dynamic
+// dimensions change (e.g., varying batch sizes).
+//
+// Example:
+//
+//	exec.WithDynamicAxes([]string{"batch", ""})  // first axis dynamic, second static
+//
+// It returns a reference to itself so calls can be cascaded.
+func (e *Exec) WithDynamicAxes(axisNames ...[]string) *Exec {
+	if e.inputIsGraph {
+		exceptions.Panicf(
+			"WithDynamicAxes: cannot use dynamic axes with func(*Graph) signature; "+
+				"dynamic axes require *Node parameters to bind concrete input shapes")
+	}
+	if !e.backend.Capabilities().DynamicAxes {
+		exceptions.Panicf(
+			"WithDynamicAxes: backend %q does not support dynamic axes", e.backend.Name())
+	}
+	e.dynamicAxes = axisNames
+	return e
 }
 
 // WithInputShardingSpecs sets the sharding specs for the inputs.
@@ -706,10 +746,7 @@ func (e *Exec) compileAndExecute(execute bool, defaultDevice backends.DeviceNum,
 	}
 
 	// Get or build the graph.
-	var entry *execGraphCacheEntry
-	err = exceptions.TryCatch[error](func() {
-		entry = e.findOrCreateGraph(argsShapes)
-	})
+	entry, err := e.findOrCreateGraph(argsShapes)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -805,34 +842,28 @@ func (e *Exec) compileAndExecute(execute bool, defaultDevice backends.DeviceNum,
 //
 // It does NOT insert into the cache — the caller is responsible for that.
 // This method does not acquire cacheMu and only reads immutable Exec fields.
-func (e *Exec) buildAndCompileGraph(argsShapes []shapes.Shape, cacheIndex int) *execGraphCacheEntry {
+//
+// Panics from the user-provided graphFn are caught and returned as errors.
+// All other error conditions return proper errors without panicking.
+func (e *Exec) buildAndCompileGraph(argsShapes []shapes.Shape, cacheIndex int) (*execGraphCacheEntry, error) {
 	entry := &execGraphCacheEntry{graph: NewGraph(e.backend, fmt.Sprintf("%s#%d", e.name, cacheIndex))}
 	g := entry.graph
 	switch e.distStrategy {
 	case distributed.AutoSharding:
-		err := g.SetAutoSharding(e.meshes...)
-		if err != nil {
-			panic(errors.WithMessagef(err, "failed to assign AutoSharding for graph %q", g.Name()))
+		if err := g.SetAutoSharding(e.meshes...); err != nil {
+			return nil, errors.WithMessagef(err, "failed to assign AutoSharding for graph %q", g.Name())
 		}
 	case distributed.SPMD:
-		err := g.SetSPMD(e.meshes[0])
-		if err != nil {
-			panic(errors.WithMessagef(err, "failed to assign SPMD for graph %q", g.Name()))
+		if err := g.SetSPMD(e.meshes[0]); err != nil {
+			return nil, errors.WithMessagef(err, "failed to assign SPMD for graph %q", g.Name())
 		}
 	case distributed.None:
 		// Nothing to do.
 	}
 	if e.deviceAssignment != nil {
-		err := g.SetDeviceAssignment(e.deviceAssignment)
-		if err != nil {
-			panic(
-				errors.WithMessagef(
-					err,
-					"failed to assign device assignment %v for graph %q",
-					e.deviceAssignment,
-					g.Name(),
-				),
-			)
+		if err := g.SetDeviceAssignment(e.deviceAssignment); err != nil {
+			return nil, errors.WithMessagef(err, "failed to assign device assignment %v for graph %q",
+				e.deviceAssignment, g.Name())
 		}
 	}
 
@@ -862,6 +893,12 @@ func (e *Exec) buildAndCompileGraph(argsShapes []shapes.Shape, cacheIndex int) *
 	default:
 		argsV = make([]reflect.Value, 0, len(argsShapesToUse))
 	}
+	// Defense-in-depth: verify the backend supports dynamic axes before injecting
+	// DynamicDim parameters. WithDynamicAxes already checks this, but guard here
+	// in case dynamicAxes is set by other means.
+	if e.dynamicAxes != nil && !e.backend.Capabilities().DynamicAxes {
+		panic(errors.Errorf("createAndCacheGraph: backend %q does not support dynamic axes", e.backend.Name()))
+	}
 	for ii, shape := range argsShapesToUse {
 		var spec *distributed.ShardingSpec
 		if ii < len(e.inputShardingSpecs) {
@@ -873,6 +910,23 @@ func (e *Exec) buildAndCompileGraph(argsShapes []shapes.Shape, cacheIndex int) *
 		if spec != nil && e.distStrategy == distributed.AutoSharding {
 			// Adjust shape to logical shape.
 			shape = spec.LogicalShapeForShard(shape)
+		}
+
+		// When dynamic axes are configured, create parameters with symbolic shapes.
+		if e.dynamicAxes != nil && ii < len(e.dynamicAxes) && e.dynamicAxes[ii] != nil {
+			axisNames := e.dynamicAxes[ii]
+			if len(axisNames) != shape.Rank() {
+				panic(errors.Errorf(
+					"WithDynamicAxes: input %d has %d axis names but input tensor has rank %d; they must match",
+					ii, len(axisNames), shape.Rank()))
+			}
+			dims := slices.Clone(shape.Dimensions)
+			for j, name := range axisNames {
+				if name != "" {
+					dims[j] = shapes.DynamicDim
+				}
+			}
+			shape = shapes.MakeDynamic(shape.DType, dims, axisNames)
 		}
 
 		arg := ShardedParameter(g, fmt.Sprintf("arg%d", ii), shape, spec)
@@ -888,31 +942,37 @@ func (e *Exec) buildAndCompileGraph(argsShapes []shapes.Shape, cacheIndex int) *
 		argsV = []reflect.Value{reflect.ValueOf(args)}
 	}
 
-	// Enumerate outputs from wrapped graphFn.
-	start := time.Now()
-	outputsV := graphFnV.Call(argsV)
-	if klog.V(1).Enabled() {
-		elapsed := time.Since(start)
-		klog.Infof("Build graph time for %q: %s", e.name, elapsed)
+	// Call graphFn — this is user code that may panic, so we catch panics here.
+	var outputsV []reflect.Value
+	err := exceptions.TryCatch[error](func() {
+		start := time.Now()
+		outputsV = graphFnV.Call(argsV)
+		if klog.V(1).Enabled() {
+			elapsed := time.Since(start)
+			klog.Infof("Build graph time for %q: %s", e.name, elapsed)
+		}
+	})
+	if err != nil {
+		return nil, errors.WithMessagef(err, "graphFn for %q panicked", e.Name())
 	}
 
 	var outputs []*Node
 	if e.outputAsSlice {
 		if len(outputsV) != 1 {
-			exceptions.Panicf("graphFn for %q returned %d results, as opposed to simply a slice of nodes -- []*Node",
+			return nil, errors.Errorf("graphFn for %q returned %d results, as opposed to simply a slice of nodes -- []*Node",
 				e.Name(), len(outputsV))
 		}
 		var ok bool
 		outputs, ok = outputsV[0].Interface().([]*Node)
 		if !ok {
-			exceptions.Panicf("graphFn for %q did not return a []*Node, instead it returned %T!?",
+			return nil, errors.Errorf("graphFn for %q did not return a []*Node, instead it returned %T",
 				e.Name(), outputsV[0].Interface())
 		}
 		entry.numGraphFnOutputs = len(outputs)
 	} else {
 		entry.numGraphFnOutputs = e.numOutputs // Fixed number of outputs.
 		if len(outputsV) != e.numOutputs {
-			exceptions.Panicf(
+			return nil, errors.Errorf(
 				"graphFn for %q returned %d results, as opposed to the actual returned %d results -- []*Node",
 				e.Name(), len(outputsV), e.numOutputs)
 		}
@@ -920,7 +980,7 @@ func (e *Exec) buildAndCompileGraph(argsShapes []shapes.Shape, cacheIndex int) *
 		for i, outV := range outputsV {
 			outputNode, ok := outV.Interface().(*Node)
 			if !ok {
-				exceptions.Panicf("graphFn for %q did not return a *Node for output #%d, instead it returned %T!?",
+				return nil, errors.Errorf("graphFn for %q did not return a *Node for output #%d, instead it returned %T",
 					e.Name(), i, outV.Interface())
 			}
 			outputs = append(outputs, outputNode)
@@ -957,23 +1017,97 @@ func (e *Exec) buildAndCompileGraph(argsShapes []shapes.Shape, cacheIndex int) *
 
 	// Compile graph.
 	g.CompileWithSharding(outputs, outputShardingSpecs)
+	// Note: for dynamic-axes graphs, argsShapes contains the concrete shapes from
+	// the first invocation. These are stored but not used for cache lookup (the
+	// dynamic path in findOrCreateGraph returns the single cached entry directly).
 	entry.argsShapes = make([]shapes.Shape, len(argsShapes))
 	copy(entry.argsShapes, argsShapes)
 	entry.numAllOutputs = len(outputs)
-	return entry
+	return entry, nil
 }
 
-// shapesKey returns a string key for a set of shapes, used to deduplicate
-// concurrent compilations for the same input shapes.
-func shapesKey(argsShapes []shapes.Shape) string {
-	var b strings.Builder
-	for i, s := range argsShapes {
-		if i > 0 {
-			b.WriteByte('|')
-		}
-		b.WriteString(s.String())
+// shapesMatch returns whether two shape slices are element-wise equal.
+func shapesMatch(a, b []shapes.Shape) bool {
+	if len(a) != len(b) {
+		return false
 	}
-	return b.String()
+	for i, s := range a {
+		if !s.Equal(b[i]) {
+			return false
+		}
+	}
+	return true
+}
+
+// lockedFindInCache searches the cache for a matching entry.
+// When dynamicAxes is configured, returns the single cached entry (if any)
+// without validation (caller must validate after releasing the lock).
+// Caller must hold e.cacheMu.
+func (e *Exec) lockedFindInCache(argsShapes []shapes.Shape) *execGraphCacheEntry {
+	// When dynamic axes are configured, there is exactly one compiled graph.
+	// The Executable handles different concrete shapes via specialization.
+	if e.dynamicAxes != nil && len(e.cache) > 0 {
+		return e.cache[0]
+	}
+
+	for _, entry := range e.cache {
+		if shapesMatch(argsShapes, entry.argsShapes) {
+			return entry
+		}
+	}
+	return nil
+}
+
+// validateDynamicAxesShapes checks that dtypes and static dimensions of argsShapes
+// match the cached entry. Dynamic dimensions may differ. Panics on mismatch.
+// Must be called without holding cacheMu.
+func (e *Exec) validateDynamicAxesShapes(argsShapes []shapes.Shape, entry *execGraphCacheEntry) {
+	if len(argsShapes) != len(entry.argsShapes) {
+		exceptions.Panicf(
+			"dynamic-axes Exec %q: argument count mismatch: got %d, compiled with %d",
+			e.Name(), len(argsShapes), len(entry.argsShapes))
+	}
+	for ii, shape := range argsShapes {
+		cached := entry.argsShapes[ii]
+		if shape.DType != cached.DType {
+			exceptions.Panicf(
+				"dynamic-axes Exec %q: input %d dtype mismatch: got %s, but graph was compiled with %s",
+				e.Name(), ii, shape.DType, cached.DType)
+		}
+		if shape.Rank() != cached.Rank() {
+			exceptions.Panicf(
+				"dynamic-axes Exec %q: input %d rank mismatch: got %d, but graph was compiled with rank %d",
+				e.Name(), ii, shape.Rank(), cached.Rank())
+		}
+		for ax := range shape.Dimensions {
+			if ii < len(e.dynamicAxes) && e.dynamicAxes[ii] != nil &&
+				ax < len(e.dynamicAxes[ii]) && e.dynamicAxes[ii][ax] != "" {
+				continue // dynamic axis, skip
+			}
+			if shape.Dimensions[ax] != cached.Dimensions[ax] {
+				exceptions.Panicf(
+					"dynamic-axes Exec %q: input %d static axis %d mismatch: got %d, but graph was compiled with %d",
+					e.Name(), ii, ax, shape.Dimensions[ax], cached.Dimensions[ax])
+			}
+		}
+	}
+}
+
+// lockedFindPending searches the pending list for an in-flight compilation
+// matching the given shapes. For dynamic-axes Execs, any pending compilation
+// produces the same symbolic graph, so the first pending entry is returned.
+// Caller must hold e.cacheMu.
+func (e *Exec) lockedFindPending(argsShapes []shapes.Shape) *pendingCompilation {
+	// For dynamic axes, all compilations produce the same symbolic graph.
+	if e.dynamicAxes != nil && len(e.pending) > 0 {
+		return e.pending[0]
+	}
+	for _, pc := range e.pending {
+		if shapesMatch(argsShapes, pc.argsShapes) {
+			return pc
+		}
+	}
+	return nil
 }
 
 // findOrCreateGraph returns the graph for the given arguments shapes: either
@@ -981,63 +1115,48 @@ func shapesKey(argsShapes []shapes.Shape) string {
 //
 // Compilation happens outside cacheMu so that concurrent callers compiling
 // different shapes can proceed in parallel.
-func (e *Exec) findOrCreateGraph(argsShapes []shapes.Shape) *execGraphCacheEntry {
-	key := shapesKey(argsShapes)
-
+func (e *Exec) findOrCreateGraph(argsShapes []shapes.Shape) (*execGraphCacheEntry, error) {
 	e.cacheMu.Lock()
 
 	if e.finalized {
 		e.cacheMu.Unlock()
-		exceptions.Panicf("Exec %q has been finalized and cannot compile new graphs", e.name)
+		return nil, errors.Errorf("Exec %q has been finalized and cannot compile new graphs", e.name)
 	}
 
 	// Fast path: already in cache.
-	for _, entry := range e.cache {
-		if len(argsShapes) == len(entry.argsShapes) {
-			match := true
-			for ii, shape := range argsShapes {
-				if !shape.Equal(entry.argsShapes[ii]) {
-					match = false
-					break
-				}
-			}
-			if match {
-				e.cacheMu.Unlock()
-				return entry
-			}
-		}
-	}
-
-	// Check max cache size before starting a new compilation.
-	if e.maxCacheSize > 0 && len(e.cache) >= e.maxCacheSize {
+	if entry := e.lockedFindInCache(argsShapes); entry != nil {
 		e.cacheMu.Unlock()
-		return nil
+		// Validate after releasing lock so panics don't leave cacheMu locked.
+		if e.dynamicAxes != nil {
+			e.validateDynamicAxesShapes(argsShapes, entry)
+		}
+		return entry, nil
 	}
 
 	// Check for in-flight compilation of the same shapes.
-	if pc, ok := e.pending[key]; ok {
+	if pc := e.lockedFindPending(argsShapes); pc != nil {
 		e.cacheMu.Unlock()
 		<-pc.done // Wait for compilation to finish.
 		if pc.err != nil {
-			exceptions.Panicf("compilation failed for shapes %s: %v", key, pc.err)
+			return nil, errors.WithMessagef(pc.err, "compilation failed for Exec %q", e.name)
 		}
-		return pc.entry
+		return pc.entry, nil
+	}
+
+	// Check max cache size before starting a new compilation.
+	if e.maxCacheSize > 0 && len(e.cache)+len(e.pending) >= e.maxCacheSize {
+		e.cacheMu.Unlock()
+		return nil, nil
 	}
 
 	// No cache hit and no in-flight compilation — start one.
-	if e.pending == nil {
-		e.pending = make(map[string]*pendingCompilation)
-	}
-	pc := &pendingCompilation{done: make(chan struct{})}
-	e.pending[key] = pc
+	pc := &pendingCompilation{argsShapes: argsShapes, done: make(chan struct{})}
+	e.pending = append(e.pending, pc)
 	cacheIndex := len(e.cache) + len(e.pending)
 	e.cacheMu.Unlock()
 
 	// Build and compile outside the lock.
-	var entry *execGraphCacheEntry
-	err := exceptions.TryCatch[error](func() {
-		entry = e.buildAndCompileGraph(argsShapes, cacheIndex)
-	})
+	entry, err := e.buildAndCompileGraph(argsShapes, cacheIndex)
 	pc.entry = entry
 	pc.err = err
 
@@ -1046,15 +1165,15 @@ func (e *Exec) findOrCreateGraph(argsShapes []shapes.Shape) *execGraphCacheEntry
 	if entry != nil {
 		e.cache = append(e.cache, entry)
 	}
-	delete(e.pending, key)
+	e.pending = slices.DeleteFunc(e.pending, func(p *pendingCompilation) bool { return p == pc })
 	e.cacheMu.Unlock()
 
 	close(pc.done) // Wake up any waiters.
 
 	if err != nil {
-		exceptions.Panicf("compilation failed: %v", err)
+		return nil, errors.WithMessagef(err, "compilation failed for Exec %q", e.name)
 	}
-	return entry
+	return entry, nil
 }
 
 // Finalize clears the cache, finalizing the compiled graphs. The Exec object shouldn't be
@@ -1063,13 +1182,10 @@ func (e *Exec) findOrCreateGraph(argsShapes []shapes.Shape) *execGraphCacheEntry
 // Finalize sets a flag to prevent new compilations, waits for any in-flight
 // compilations to complete, then finalizes all cached graphs.
 func (e *Exec) Finalize() {
-	// Mark as finalized and collect in-flight compilations.
+	// Mark as finalized and snapshot in-flight compilations.
 	e.cacheMu.Lock()
 	e.finalized = true
-	pendingList := make([]*pendingCompilation, 0, len(e.pending))
-	for _, pc := range e.pending {
-		pendingList = append(pendingList, pc)
-	}
+	pendingList := slices.Clone(e.pending)
 	e.cacheMu.Unlock()
 
 	// Wait outside the lock so in-flight compilations can finish.

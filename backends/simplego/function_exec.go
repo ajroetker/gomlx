@@ -146,7 +146,25 @@ type funcExecBuffers struct {
 // capturedInputs are the values captured from parent scopes (for closures).
 // donateCaptures indicates which captured inputs can be donated to the closure.
 // If donateCaptures is nil, no captured inputs will be donated.
-func (fe *FunctionExecutable) Execute(backend *Backend, inputs []*Buffer, donate []bool, capturedInputs []*Buffer, donateCaptures []bool) ([]*Buffer, error) {
+func (fe *FunctionExecutable) Execute(backend *Backend, inputs []*Buffer, donate []bool, capturedInputs []*Buffer,
+	donateCaptures []bool) ([]*Buffer, error) {
+	return fe.executeInternal(backend, inputs, donate, capturedInputs, donateCaptures, nil)
+}
+
+// ExecuteWithResolvedNodes runs the compiled function using resolved node copies
+// from a ShapeSpecialization. The resolvedNodes slice must be the same length
+// as fe.function.nodes, with each entry being a shallow copy whose shape has
+// been resolved to concrete dimensions. This is the dynamic-shapes execution path.
+func (fe *FunctionExecutable) ExecuteWithResolvedNodes(backend *Backend, inputs []*Buffer, donate []bool,
+	capturedInputs []*Buffer, donateCaptures []bool, resolvedNodes []*Node) ([]*Buffer, error) {
+	return fe.executeInternal(backend, inputs, donate, capturedInputs, donateCaptures, resolvedNodes)
+}
+
+// executeInternal is the shared implementation for Execute and ExecuteWithResolvedNodes.
+// When resolvedNodes is nil, the original function nodes are used (static path).
+// When resolvedNodes is provided, those nodes (with concrete shapes) are used instead.
+func (fe *FunctionExecutable) executeInternal(backend *Backend, inputs []*Buffer, donate []bool,
+	capturedInputs []*Buffer, donateCaptures []bool, resolvedNodes []*Node) ([]*Buffer, error) {
 	// Use function's parameters (not builder.inputs) for proper function/closure support
 	funcParams := fe.function.parameters
 	if len(inputs) != len(funcParams) {
@@ -168,6 +186,12 @@ func (fe *FunctionExecutable) Execute(backend *Backend, inputs []*Buffer, donate
 	// donateCaptures defaults to false (no donation)
 	if len(donateCaptures) == 0 {
 		donateCaptures = make([]bool, len(capturedInputs))
+	}
+
+	// Pick node source once: resolved copies for dynamic path, originals for static.
+	nodes := fe.function.nodes
+	if resolvedNodes != nil {
+		nodes = resolvedNodes
 	}
 
 	// Get execution buffers from pool and reset
@@ -208,18 +232,25 @@ func (fe *FunctionExecutable) Execute(backend *Backend, inputs []*Buffer, donate
 	// Execute
 	var err error
 	if executionMode == opsExecutionSequential {
-		err = fe.executeSequentially(backend, execBuf)
+		err = fe.executeSequentially(backend, execBuf, nodes)
 	} else {
-		err = fe.executeParallel(backend, execBuf)
+		err = fe.executeParallel(backend, execBuf, nodes)
 	}
 	if err != nil {
 		fe.executionBuffersPool.Put(execBuf)
 		return nil, err
 	}
 
-	// Collect outputs
-	outputs := make([]*Buffer, len(fe.outputNodes))
-	for i, outNode := range fe.outputNodes {
+	// Collect outputs using the appropriate node source for output node lookup.
+	outputNodes := fe.outputNodes
+	if resolvedNodes != nil {
+		outputNodes = make([]*Node, len(fe.outputNodes))
+		for i, n := range fe.outputNodes {
+			outputNodes[i] = resolvedNodes[n.idx]
+		}
+	}
+	outputs := make([]*Buffer, len(outputNodes))
+	for i, outNode := range outputNodes {
 		outIdx := outNode.idx
 		outputs[i] = execBuf.results[outIdx]
 		if outputs[i] == nil {
@@ -230,6 +261,7 @@ func (fe *FunctionExecutable) Execute(backend *Backend, inputs []*Buffer, donate
 			// Clone the buffer since we don't own it
 			outputs[i], err = backend.cloneBuffer(execBuf.results[outIdx])
 			if err != nil {
+				fe.executionBuffersPool.Put(execBuf)
 				return nil, err
 			}
 		}
@@ -248,7 +280,9 @@ func (fe *FunctionExecutable) Execute(backend *Backend, inputs []*Buffer, donate
 }
 
 // executeSequentially executes nodes one after another in topological order.
-func (fe *FunctionExecutable) executeSequentially(backend *Backend, execBuf *funcExecBuffers) error {
+// The nodes parameter selects the node source: resolved copies for dynamic shapes,
+// or fe.function.nodes for the static path.
+func (fe *FunctionExecutable) executeSequentially(backend *Backend, execBuf *funcExecBuffers, nodes []*Node) error {
 	// Pre-allocate input buffers for reuse
 	execBuf.opInputBuffers = make([]*Buffer, fe.maxInputs)
 	execBuf.opInputsOwned = make([]bool, fe.maxInputs)
@@ -267,7 +301,7 @@ func (fe *FunctionExecutable) executeSequentially(backend *Backend, execBuf *fun
 			continue
 		}
 
-		node := fe.function.nodes[nodeIdx]
+		node := nodes[nodeIdx]
 		if err := fe.executeNode(backend, node, execBuf); err != nil {
 			return err
 		}
@@ -276,7 +310,9 @@ func (fe *FunctionExecutable) executeSequentially(backend *Backend, execBuf *fun
 }
 
 // executeParallel executes nodes in parallel based on dependency graph.
-func (fe *FunctionExecutable) executeParallel(backend *Backend, execBuf *funcExecBuffers) error {
+// The nodes parameter selects the node source: resolved copies for dynamic shapes,
+// or fe.function.nodes for the static path.
+func (fe *FunctionExecutable) executeParallel(backend *Backend, execBuf *funcExecBuffers, nodes []*Node) error {
 	var (
 		readyToExecute chan int
 		collectErrors  []error
@@ -293,7 +329,7 @@ func (fe *FunctionExecutable) executeParallel(backend *Backend, execBuf *funcExe
 	for nodeIdx := range fe.numNodesToProcess {
 		if fe.numUses[nodeIdx] > 0 {
 			expected++
-			node := fe.function.nodes[nodeIdx]
+			node := nodes[nodeIdx]
 			// Total dependencies = regular inputs + all captured inputs across closures
 			totalCaptured := 0
 			for _, closureCaptures := range node.capturedInputs {
@@ -315,7 +351,7 @@ func (fe *FunctionExecutable) executeParallel(backend *Backend, execBuf *funcExe
 
 	for nodeIdx := range readyToExecute {
 		nodeExecFn := func() {
-			node := fe.function.nodes[nodeIdx]
+			node := nodes[nodeIdx]
 
 			defer func(nodeIdx int) {
 				execMu.Lock()
@@ -431,7 +467,8 @@ func (fe *FunctionExecutable) executeNode(backend *Backend, node *Node, execBuf 
 	// Check for closure executor first (If, While, Sort).
 	// Closure executors receive captured inputs separately with explicit ownership tracking.
 	closureExecutor := nodeClosureExecutors[node.opType]
-	if closureExecutor != nil {
+	switch {
+	case closureExecutor != nil:
 		// Build []ClosureInputs from node.capturedInputs (already grouped per closure).
 		closureInputs := make([]ClosureInputs, len(node.capturedInputs))
 		for closureIdx, closureCaptures := range node.capturedInputs {
@@ -443,7 +480,8 @@ func (fe *FunctionExecutable) executeNode(backend *Backend, node *Node, execBuf 
 				capturedIdx := capturedNode.idx
 				closureInputs[closureIdx].Buffers[i] = execBuf.results[capturedIdx]
 				if closureInputs[closureIdx].Buffers[i] == nil {
-					return errors.Errorf("captured input %d for closure %d of node %s not computed yet", i, closureIdx, node.opType)
+					return errors.Errorf("captured input %d for closure %d of node %s not computed yet",
+						i, closureIdx, node.opType)
 				}
 				// Only "own" the captured input if this is the last use of it.
 				closureInputs[closureIdx].Owned[i] = execBuf.owned[capturedIdx] &&
@@ -477,7 +515,7 @@ func (fe *FunctionExecutable) executeNode(backend *Backend, node *Node, execBuf 
 			execBuf.results[outputNodeIdx] = outputBuf
 			execBuf.owned[outputNodeIdx] = true
 		}
-	} else if node.IsMultiOutputs() {
+	case node.IsMultiOutputs():
 		// Execute the node
 		multiExecutor := multiOutputsNodeExecutors[node.opType]
 		if multiExecutor == nil {
@@ -500,7 +538,7 @@ func (fe *FunctionExecutable) executeNode(backend *Backend, node *Node, execBuf 
 			execBuf.results[outputNodeIdx] = outputBuf
 			execBuf.owned[outputNodeIdx] = true
 		}
-	} else {
+	default:
 		executor := nodeExecutors[node.opType]
 		if executor == nil {
 			return errors.Errorf("no executor for op %s", node.opType)
@@ -516,66 +554,70 @@ func (fe *FunctionExecutable) executeNode(backend *Backend, node *Node, execBuf 
 
 	// Update usage counts and free unused buffers.
 	// The lock protects results in parallel mode; numUsed uses atomics for safe reads.
-	if execBuf.opsExecutionType == opsExecutionParallel {
-		execBuf.mu.Lock()
-	}
-	for i, input := range node.inputs {
-		inputIdx := input.idx
-		newCount := execBuf.numUsed[inputIdx].Add(1) // Mark this input as used.
-		if inputBuffers[i] == nil {
-			// Input buffer is nil, means it has been consumed by the operation.
-			// Mark that the associated results is no longer available.
-			execBuf.results[inputIdx] = nil
-			continue
+	// This section is extracted into a closure so that defer correctly releases the mutex
+	// on all exit paths (including error returns).
+	cleanupErr := func() error {
+		if execBuf.opsExecutionType == opsExecutionParallel {
+			execBuf.mu.Lock()
+			defer execBuf.mu.Unlock()
 		}
-		if !inputBuffers[i].inUse {
-			return errors.Errorf("input #%d for node %s has been released, but not marked as consumed!?",
-				i, node.opType)
-		}
-		if int(newCount) == fe.numUses[inputIdx] && execBuf.owned[inputIdx] {
-			// Check if it is reused as one of the outputs -- common for in-place operations, like in exec_binary.go.
-			// The contract is that if the input is reused, the operator must set the input buffer to nil in the input slice.
-			// If we find the input buffer reused as an output but it is not nil here, it is a bug in the operator implementation.
-			if node.IsMultiOutputs() {
-				for outIdx, outputNode := range node.multiOutputsNodes {
-					if execBuf.results[outputNode.idx] == inputBuffers[i] {
-						return errors.Errorf("op %s (output %d) reused input %d as output but didn't set input to nil in buffer slice", node.opType, outIdx, i)
-					}
-				}
-			} else {
-				if execBuf.results[nodeIdx] == inputBuffers[i] {
-					return errors.Errorf("op %s reused input %d as output but didn't set input to nil in buffer slice", node.opType, i)
-				}
-			}
-
-			// Release the input buffer - all users have finished.
-			backend.putBuffer(inputBuffers[i])
-			execBuf.results[inputIdx] = nil
-		}
-	}
-	// Also update usage counts for captured inputs.
-	// These are treated as additional inputs for lifetime tracking.
-	for _, closureCaptures := range node.capturedInputs {
-		for _, capturedInput := range closureCaptures {
-			capturedIdx := capturedInput.idx
-			newCount := execBuf.numUsed[capturedIdx].Add(1)
-			capturedBuf := execBuf.results[capturedIdx]
-			if capturedBuf == nil {
+		for i, input := range node.inputs {
+			inputIdx := input.idx
+			newCount := execBuf.numUsed[inputIdx].Add(1) // Mark this input as used.
+			if inputBuffers[i] == nil {
+				// Input buffer is nil, means it has been consumed by the operation.
+				// Mark that the associated results is no longer available.
+				execBuf.results[inputIdx] = nil
 				continue
 			}
-			if int(newCount) == fe.numUses[capturedIdx] && execBuf.owned[capturedIdx] {
-				// Release the captured buffer - all users have finished.
-				backend.putBuffer(capturedBuf)
-				execBuf.results[capturedIdx] = nil
+			if !inputBuffers[i].inUse {
+				return errors.Errorf("input #%d for node %s has been released, but not marked as consumed!?",
+					i, node.opType)
+			}
+			if int(newCount) == fe.numUses[inputIdx] && execBuf.owned[inputIdx] {
+				// Check if it is reused as one of the outputs -- common for in-place operations, like in exec_binary.go.
+				// The contract is that if the input is reused, the operator must set the input buffer to nil in the input slice.
+				// If we find the input buffer reused as an output but it is not nil here, it is a bug in the operator implementation.
+				if node.IsMultiOutputs() {
+					for outIdx, outputNode := range node.multiOutputsNodes {
+						if execBuf.results[outputNode.idx] == inputBuffers[i] {
+							return errors.Errorf("op %s (output %d) reused input %d as output but didn't set input to nil in buffer slice", node.opType, outIdx, i)
+						}
+					}
+				} else if execBuf.results[nodeIdx] == inputBuffers[i] {
+					return errors.Errorf("op %s reused input %d as output but didn't set input to nil in buffer slice",
+						node.opType, i)
+				}
+
+				// Release the input buffer - all users have finished.
+				backend.putBuffer(inputBuffers[i])
+				execBuf.results[inputIdx] = nil
 			}
 		}
-	}
-	if execBuf.opsExecutionType == opsExecutionParallel {
-		execBuf.mu.Unlock()
-	} else {
+		// Also update usage counts for captured inputs.
+		// These are treated as additional inputs for lifetime tracking.
+		for _, closureCaptures := range node.capturedInputs {
+			for _, capturedInput := range closureCaptures {
+				capturedIdx := capturedInput.idx
+				newCount := execBuf.numUsed[capturedIdx].Add(1)
+				capturedBuf := execBuf.results[capturedIdx]
+				if capturedBuf == nil {
+					continue
+				}
+				if int(newCount) == fe.numUses[capturedIdx] && execBuf.owned[capturedIdx] {
+					// Release the captured buffer - all users have finished.
+					backend.putBuffer(capturedBuf)
+					execBuf.results[capturedIdx] = nil
+				}
+			}
+		}
+		return nil
+	}()
+
+	if execBuf.opsExecutionType != opsExecutionParallel {
 		execBuf.opInputBuffers = inputBuffers
 		execBuf.opInputsOwned = inputsOwned
 	}
 
-	return nil
+	return cleanupErr
 }
