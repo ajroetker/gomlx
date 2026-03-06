@@ -518,3 +518,80 @@ func TestBatchedKVCacheFunctions(t *testing.T) {
 		assert.InDelta(t, 0.0, maskVal[1][0][0][6], 0.01, "Batch 1 pos 6 not filled")
 	})
 }
+
+
+// TestFlatKVCacheAccessor tests the FlatKVCacheAccessor round-trip.
+func TestFlatKVCacheAccessor(t *testing.T) {
+	backend := graphtest.BuildTestBackend()
+
+	t.Run("WriteReadRoundTrip", func(t *testing.T) {
+		ctx := context.New()
+		batchSize := 2
+		numHeads := 1
+		maxSeqLen := 8
+		headDim := 2
+
+		exec := context.MustNewExec(backend, ctx, func(testCtx *context.Context, positions, keys, values *Node) *Node {
+			g := positions.Graph()
+			cacheCtx := testCtx.In("layer0").In("attn").Reuse().Checked(false)
+
+			accessor := NewFlatKVCacheAccessor(batchSize, numHeads, maxSeqLen, headDim, dtypes.Float32, positions)
+			cachedKeys, _ := accessor.WriteRead(cacheCtx, g, keys, values)
+			return cachedKeys
+		})
+
+		keys := [][][][]float32{
+			{{{10.0, 11.0}}},
+			{{{20.0, 21.0}}},
+		}
+		values := [][][][]float32{
+			{{{10.0, 11.0}}},
+			{{{20.0, 21.0}}},
+		}
+		positions := []int32{2, 5}
+
+		results := exec.MustExec(positions, keys, values)
+		cached := results[0].Value().([][][][]float32)
+
+		// Batch 0 at position 2
+		assert.InDelta(t, 10.0, cached[0][0][2][0], 0.01)
+		assert.InDelta(t, 11.0, cached[0][0][2][1], 0.01)
+
+		// Batch 1 at position 5
+		assert.InDelta(t, 20.0, cached[1][0][5][0], 0.01)
+		assert.InDelta(t, 21.0, cached[1][0][5][1], 0.01)
+	})
+
+	t.Run("MaskMatchesBatched", func(t *testing.T) {
+		ctx := context.New()
+		batchSize := 2
+		numHeads := 1
+		maxSeqLen := 8
+		headDim := 2
+
+		exec := context.MustNewExec(backend, ctx, func(testCtx *context.Context, positions *Node) *Node {
+			g := positions.Graph()
+			accessor := NewFlatKVCacheAccessor(batchSize, numHeads, maxSeqLen, headDim, dtypes.Float32, positions)
+			mask := accessor.Mask(g, 1)
+			return ConvertDType(mask, dtypes.Float32)
+		})
+
+		positions := []int32{3, 6}
+		results := exec.MustExec(positions)
+		maskVal := results[0].Value().([][][][]float32)
+
+		// Same assertions as TestBatchedKVCacheFunctions/BatchedAttentionMask
+		assert.InDelta(t, 1.0, maskVal[0][0][0][0], 0.01, "Batch 0 pos 0 filled")
+		assert.InDelta(t, 1.0, maskVal[0][0][0][2], 0.01, "Batch 0 pos 2 filled")
+		assert.InDelta(t, 0.0, maskVal[0][0][0][3], 0.01, "Batch 0 pos 3 not filled")
+		assert.InDelta(t, 1.0, maskVal[1][0][0][5], 0.01, "Batch 1 pos 5 filled")
+		assert.InDelta(t, 0.0, maskVal[1][0][0][6], 0.01, "Batch 1 pos 6 not filled")
+	})
+
+	t.Run("KeySeqLen", func(t *testing.T) {
+		accessor := &FlatKVCacheAccessor{
+			CacheShape: shapes.Make(dtypes.Float32, 1, 2, 16, 8),
+		}
+		assert.Equal(t, 16, accessor.KeySeqLen())
+	})
+}

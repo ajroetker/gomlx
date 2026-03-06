@@ -10,6 +10,7 @@ import (
 	"github.com/gomlx/gomlx/pkg/core/shapes"
 	"github.com/gomlx/gomlx/pkg/ml/context"
 	"github.com/gomlx/gomlx/pkg/ml/decode/sample"
+	"github.com/gomlx/gomlx/pkg/ml/layers/attention"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -150,6 +151,110 @@ func TestBeamSearch(t *testing.T) {
 	// Expect best sequences: shape [batch, seq_len]
 	assert.Equal(t, 2, result.Rank())
 	assert.Equal(t, []int{1, 10}, result.Shape().Dimensions)
+}
+
+// TestUnifiedModelFnDecoder tests the unified ModelFn path through the Decoder.
+func TestUnifiedModelFnDecoder(t *testing.T) {
+	t.Run("GreedyWithKVCache", func(t *testing.T) {
+		backend := graphtest.BuildTestBackend()
+		ctx := context.New()
+		vocabSize := 10
+
+		// ModelFn that returns logits strongly preferring token 5.
+		// It creates KV projections and writes them to the cache to exercise the full path.
+		var modelFn ModelFn = func(ctx *context.Context, tokens *Node, positions *Node, kv attention.KVCacheAccessor) *Node {
+			batchSize := tokens.Shape().Dimensions[0]
+			seqLen := tokens.Shape().Dimensions[1]
+			g := tokens.Graph()
+			logits := IotaFull(g, shapes.Make(dtypes.Float32, batchSize, seqLen, vocabSize))
+			indices := Iota(g, logits.Shape(), 2)
+			logits = Where(Equal(indices, ConstAs(indices, 5)), ConstAs(logits, 100.0), logits)
+			return logits
+		}
+
+		dec := New(modelFn).
+			WithKVCacheConfig(1, 4, 20, dtypes.Float32).
+			WithStrategy(sample.StrategyGreedy).
+			WithMaxLength(10)
+
+		prompt := [][]int32{{1, 2, 3}}
+		result, err := dec.Decode(backend, ctx, prompt)
+		require.NoError(t, err)
+		require.NotNil(t, result)
+		assert.Equal(t, 2, result.Rank())
+		assert.Equal(t, []int{1, 10}, result.Shape().Dimensions)
+		seq := result.Value().([][]int32)
+		// All generated tokens should be 5 (greedy picks highest logit)
+		for i := 3; i < 10; i++ {
+			assert.Equal(t, int32(5), seq[0][i], "token at position %d", i)
+		}
+	})
+
+	t.Run("WithoutKVCache", func(t *testing.T) {
+		backend := graphtest.BuildTestBackend()
+		ctx := context.New()
+		vocabSize := 10
+
+		// ModelFn without KV cache — falls back to full-sequence generation.
+		var modelFn ModelFn = func(ctx *context.Context, tokens *Node, positions *Node, kv attention.KVCacheAccessor) *Node {
+			assert.Nil(t, kv, "kv should be nil when no cache config is set")
+			batchSize := tokens.Shape().Dimensions[0]
+			seqLen := tokens.Shape().Dimensions[1]
+			g := tokens.Graph()
+			logits := IotaFull(g, shapes.Make(dtypes.Float32, batchSize, seqLen, vocabSize))
+			indices := Iota(g, logits.Shape(), 2)
+			logits = Where(Equal(indices, ConstAs(indices, 7)), ConstAs(logits, 100.0), logits)
+			return logits
+		}
+
+		dec := New(modelFn).
+			WithStrategy(sample.StrategyGreedy).
+			WithMaxLength(8)
+
+		prompt := [][]int32{{1, 2, 3}}
+		result, err := dec.Decode(backend, ctx, prompt)
+		require.NoError(t, err)
+		require.NotNil(t, result)
+		assert.Equal(t, []int{1, 8}, result.Shape().Dimensions)
+		seq := result.Value().([][]int32)
+		// Generated tokens should be 7
+		for i := 3; i < 8; i++ {
+			assert.Equal(t, int32(7), seq[0][i], "token at position %d", i)
+		}
+	})
+
+	t.Run("EarlyStopOnEOS", func(t *testing.T) {
+		backend := graphtest.BuildTestBackend()
+		ctx := context.New()
+		vocabSize := 10
+		eosToken := 9
+
+		// ModelFn that always outputs EOS token → generation stops immediately.
+		var modelFn ModelFn = func(ctx *context.Context, tokens *Node, positions *Node, kv attention.KVCacheAccessor) *Node {
+			batchSize := tokens.Shape().Dimensions[0]
+			seqLen := tokens.Shape().Dimensions[1]
+			g := tokens.Graph()
+			logits := IotaFull(g, shapes.Make(dtypes.Float32, batchSize, seqLen, vocabSize))
+			indices := Iota(g, logits.Shape(), 2)
+			logits = Where(Equal(indices, ConstAs(indices, eosToken)), ConstAs(logits, 100.0), logits)
+			return logits
+		}
+
+		dec := New(modelFn).
+			WithKVCacheConfig(1, 4, 20, dtypes.Float32).
+			WithStrategy(sample.StrategyGreedy).
+			WithMaxLength(20).
+			WithEOS(eosToken)
+
+		prompt := [][]int32{{1, 2}}
+		result, err := dec.Decode(backend, ctx, prompt)
+		require.NoError(t, err)
+		require.NotNil(t, result)
+		seq := result.Value().([][]int32)
+		// First generated token is EOS → result = prompt (2) + EOS (1) = 3 tokens
+		assert.Equal(t, 3, len(seq[0]), "should stop after first EOS")
+		assert.Equal(t, int32(eosToken), seq[0][2])
+	})
 }
 
 // TestStreamingNotImplemented groups streaming placeholder test.

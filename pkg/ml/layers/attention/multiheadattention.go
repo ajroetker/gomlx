@@ -54,6 +54,10 @@ type MultiHeadAttentionBuilder struct {
 	position       *Node // Position as a graph node (scalar int32) for graph caching
 	actualCacheLen *Node // Actual filled cache length (scalar int32)
 
+	// kvCacheAccessor is an engine-provided KV cache abstraction.
+	// When set (via WithKVCacheAccessor), it replaces direct KV cache operations.
+	kvCacheAccessor KVCacheAccessor
+
 	// Positional Encoder to be used, e.g: RoPE.
 	positionalEncoder pos.Encoder
 
@@ -392,6 +396,24 @@ func (b *MultiHeadAttentionBuilder) WithKVCache(maxSeqLen int, position *Node) *
 	return b
 }
 
+// WithKVCacheAccessor enables incremental generation using an engine-provided
+// KVCacheAccessor. This decouples the model from the KV cache layout, allowing
+// the serving engine to transparently use flat or paged caching.
+//
+// Unlike WithKVCache (which creates and manages cache variables internally),
+// WithKVCacheAccessor delegates all cache operations to the accessor.
+//
+// Parameters:
+//   - accessor: Engine-provided KVCacheAccessor for read/write/mask operations.
+//
+// The accessor's KeySeqLen() determines the effective key length for attention.
+func (b *MultiHeadAttentionBuilder) WithKVCacheAccessor(accessor KVCacheAccessor) *MultiHeadAttentionBuilder {
+	b.kvCacheAccessor = accessor
+	b.useCausalMask = true
+	b.buildAttentionShape()
+	return b
+}
+
 // KVCacheShape returns the shape of the KV cache configured for this attention layer.
 // Shape is [batchSize, numKVHeads, maxSeqLen, headDim] (numKVHeads equals numHeads unless SetNumKVHeads was called).
 // Returns an invalid shape if WithKVCache was not called.
@@ -519,7 +541,20 @@ func (b *MultiHeadAttentionBuilder) doneInternal(wantCoefficients bool) (attenti
 	}
 
 	// Handle KV cache if in incremental generation mode
-	if b.kvCacheShape.Ok() {
+	if b.kvCacheAccessor != nil {
+		// Use engine-provided accessor for KV cache operations.
+		// Cache format: [batch, numHeads, seqLen, headDim]
+		// Projected format: [batch, seqLen, numHeads, headDim]
+		keyForCache := TransposeAllDims(projectedKey, 0, 2, 1, 3)
+		valueForCache := TransposeAllDims(projectedValue, 0, 2, 1, 3)
+
+		cacheCtx := b.ctx.In("kv_cache").Reuse().Checked(false)
+		fullKey, fullValue := b.kvCacheAccessor.WriteRead(cacheCtx, b.g, keyForCache, valueForCache)
+
+		projectedKey = TransposeAllDims(fullKey, 0, 2, 1, 3)
+		projectedValue = TransposeAllDims(fullValue, 0, 2, 1, 3)
+	} else if b.kvCacheShape.Ok() {
+		// Legacy path: direct KV cache operations.
 		// Cache expects shape: [batch, numHeads, seqLen, headDim]
 		// projectedKey/Value shape: [batch, seqLen, numHeads, headDim]
 		// Transpose: (0,1,2,3) -> (0,2,1,3)
@@ -555,8 +590,8 @@ func (b *MultiHeadAttentionBuilder) doneInternal(wantCoefficients bool) (attenti
 
 	scale := 1.0 / math.Sqrt(float64(b.keyQueryDim))
 	// Pass causal to Core only when not using KV cache (Core builds a simple lower-triangular mask).
-	// When using KV cache, the position-aware causal mask is already built in buildMask above.
-	passCausal := b.useCausalMask && !b.kvCacheShape.Ok()
+	// When using KV cache or accessor, the position-aware causal mask is already built in buildMask above.
+	passCausal := b.useCausalMask && !b.kvCacheShape.Ok() && b.kvCacheAccessor == nil
 	attentionOutput, attentionCoefficients = Core(b.ctx, projectedQuery, projectedKey, projectedValue, scale, mask, b.dropoutRate, b.layout, passCausal, wantCoefficients)
 
 	// Merge [numHeads, valueDim] into one axis and unflatten query inner dims if needed.
@@ -626,7 +661,9 @@ func (b *MultiHeadAttentionBuilder) qkvProject(x *Node) (projectedQuery, project
 func (b *MultiHeadAttentionBuilder) buildAttentionShape() {
 	// Determine effective key length (may be larger than current key when caching)
 	var keyLen int
-	if b.kvCacheShape.Ok() {
+	if b.kvCacheAccessor != nil {
+		keyLen = b.kvCacheAccessor.KeySeqLen()
+	} else if b.kvCacheShape.Ok() {
 		// In cache mode, key length is the full cache size (kvCacheShape is [batch, heads, maxSeqLen, headDim])
 		keyLen = b.kvCacheShape.Dimensions[2]
 	} else {
@@ -665,7 +702,21 @@ func (b *MultiHeadAttentionBuilder) buildMask() (mask *Node) {
 	}
 
 	// KV cache causal mask: position-aware, built here since Core doesn't know about cache.
-	if b.useCausalMask && b.kvCacheShape.Ok() {
+	if b.useCausalMask && b.kvCacheAccessor != nil {
+		// Use accessor's mask (handles both flat and paged caches).
+		queryLen := b.query.Shape().Dimensions[1]
+		accessorMask := b.kvCacheAccessor.Mask(b.g, queryLen)
+		// accessorMask shape: [batch, 1, queryLen, keyLen]
+		// Convert to attention mask shape: [batch, queryLen, numHeads, keyLen]
+		accessorMask = Squeeze(accessorMask, 1)    // [batch, queryLen, keyLen]
+		accessorMask = ExpandDims(accessorMask, 2) // [batch, queryLen, 1, keyLen]
+		accessorMask = BroadcastToDims(accessorMask, b.attentionShape.Dimensions...)
+		if mask == nil {
+			mask = accessorMask
+		} else {
+			mask = LogicalAnd(mask, accessorMask)
+		}
+	} else if b.useCausalMask && b.kvCacheShape.Ok() {
 		causalMask := b.buildCausalMask()
 		if mask == nil {
 			mask = causalMask
