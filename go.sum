@@ -17,6 +17,10 @@ github.com/MetalBlueberry/go-plotly v0.7.0 h1:L96bAGUBhmaFU9NzDJ6/K16laG2jfAU+O8
 github.com/MetalBlueberry/go-plotly v0.7.0/go.mod h1:ZwS+MV22I9OdC2hUPXAu2xrOYsUcylk6qBa2u5qAgHc=
 github.com/ajroetker/go-highway v0.0.10 h1:0GxF0qA289tcxwj4n1eIZKl3IyoKl0jw2LdqykZJeLQ=
 github.com/ajroetker/go-highway v0.0.10/go.mod h1:yhghcLHlM/LHIaHUmFfl/Ej/mCKUow2RHF2+aX3UF4s=
+github.com/ajroetker/go-highway v0.0.12-0.20260305222801-80140b6a8a5e h1:SH3ctu1vHFWMwncyD3SrdGigejALNs7mO8kjGtls+94=
+github.com/ajroetker/go-highway v0.0.12-0.20260305222801-80140b6a8a5e/go.mod h1:un7fcrwix7UOHJrr18Lgh5eeF+1yaZiGWdTw3FbfDv4=
+github.com/ajroetker/go-highway v0.0.12-0.20260306173127-e77622f28f41 h1:xgsMG2xpMtsoteu6w7xyM2H1m4ofRfO3cQbV2w8ukT4=
+github.com/ajroetker/go-highway v0.0.12-0.20260306173127-e77622f28f41/go.mod h1:un7fcrwix7UOHJrr18Lgh5eeF+1yaZiGWdTw3FbfDv4=
 github.com/ajstarks/deck v0.0.0-20200831202436-30c9fc6549a9/go.mod h1:JynElWSGnm/4RlzPXRlREEwqTHAN3T56Bv2ITsFT3gY=
 github.com/ajstarks/deck/generate v0.0.0-20210309230005-c3f852c02e19/go.mod h1:T13YZdzov6OU0A1+RfKZiZN9ca6VeKdBdyDV+BY97Tk=
 github.com/ajstarks/svgo v0.0.0-20211024235047-1546f124cd8b h1:slYM766cy2nI3BwyRiyQj/Ud48djTMtMebDqepE95rw=

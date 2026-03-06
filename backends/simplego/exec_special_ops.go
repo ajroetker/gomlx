@@ -549,11 +549,59 @@ func execTranspose(backend *Backend, node *Node, inputs []*Buffer, inputsOwned [
 		return nil, err
 	}
 	output.shape = node.shape
+
+	// Fast path: if only the last two axes are swapped (and all others are identity),
+	// this is a batched 2D transpose that Highway can accelerate with SIMD.
+	if tryHighwayTranspose(operand, output, permutations) {
+		return output, nil
+	}
+
 	it := newTransposeIterator(operand.shape, permutations)
 	dtype := node.shape.DType
 	transposeFn := transposeDTypeMap.Get(dtype).(func(operand, output *Buffer, it *transposeIterator))
 	transposeFn(operand, output, it)
 	return output, nil
+}
+
+// tryHighwayTranspose attempts to use Highway SIMD for transposes where only the
+// last two axes are swapped. Returns true if it handled the transpose.
+func tryHighwayTranspose(operand, output *Buffer, permutations []int) bool {
+	rank := len(permutations)
+	if rank < 2 {
+		return false
+	}
+
+	// Check that all axes except the last two are identity.
+	for i := 0; i < rank-2; i++ {
+		if permutations[i] != i {
+			return false
+		}
+	}
+	// Check that the last two axes are swapped.
+	if permutations[rank-2] != rank-1 || permutations[rank-1] != rank-2 {
+		return false
+	}
+
+	dims := operand.shape.Dimensions
+	m := dims[rank-2]
+	k := dims[rank-1]
+
+	// Calculate batch size (product of all leading dimensions).
+	batchSize := 1
+	for i := 0; i < rank-2; i++ {
+		batchSize *= dims[i]
+	}
+
+	dtype := operand.shape.DType
+	stride := m * k
+	for b := range batchSize {
+		srcSlice := sliceAt(operand.flat, b*stride, stride)
+		dstSlice := sliceAt(output.flat, b*stride, stride)
+		if !Highway.Transpose2D(dtype, srcSlice, m, k, dstSlice) {
+			return false
+		}
+	}
+	return true
 }
 
 type transposeIterator struct {

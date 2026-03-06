@@ -20,6 +20,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"runtime/pprof"
 	"strings"
 	"time"
 
@@ -39,6 +40,7 @@ import (
 	"k8s.io/klog/v2"
 
 	_ "github.com/gomlx/gomlx/backends/default"
+	_ "github.com/gomlx/gomlx/backends/simplego/highway"
 )
 
 const (
@@ -54,11 +56,24 @@ var (
 	flagMaxSeqLen   = flag.Int("max-seq-len", 256, "Maximum total sequence length (prompt + generated tokens).")
 	flagFP16        = flag.Bool("fp16", false, "Use fp16 (float16) model variant (570MB instead of 1.14GB).")
 	flagBackend     = flag.String("backend", "", "Backend to use (default: auto-detect).")
+	flagCPUProfile  = flag.String("cpuprofile", "", "Write CPU profile to file.")
 )
 
 func main() {
 	klog.InitFlags(nil)
 	flag.Parse()
+
+	if *flagCPUProfile != "" {
+		f, err := os.Create(*flagCPUProfile)
+		if err != nil {
+			klog.Fatalf("Failed to create CPU profile: %v", err)
+		}
+		defer f.Close()
+		if err := pprof.StartCPUProfile(f); err != nil {
+			klog.Fatalf("Failed to start CPU profile: %v", err)
+		}
+		defer pprof.StopCPUProfile()
+	}
 
 	if *flagBackend != "" {
 		if err := os.Setenv("GOMLX_BACKEND", *flagBackend); err != nil {
