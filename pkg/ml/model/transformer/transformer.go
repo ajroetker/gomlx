@@ -227,6 +227,97 @@ func (m *Model) ForGeneration() decode.IncrementalModelFn {
 	}
 }
 
+// ForUnifiedGeneration returns a unified ModelFn for serving engines.
+// Positions are tensors (enabling O(1) compilation), and KV cache layout
+// is owned by the engine via the KVCacheAccessor.
+func (m *Model) ForUnifiedGeneration() decode.ModelFn {
+	return func(ctx *context.Context, tokens *Node, positions *Node, kv attention.KVCacheAccessor) *Node {
+		return m.forwardUnified(ctx, tokens, positions, kv)
+	}
+}
+
+// forwardUnified is the unified forward path for serving.
+// Unlike forwardFull, positions are always tensors and cache operations
+// are delegated to the KVCacheAccessor.
+func (m *Model) forwardUnified(
+	ctx *context.Context,
+	tokens *Node,
+	positions *Node,
+	kv attention.KVCacheAccessor,
+) *Node {
+	cfg := m
+	g := tokens.Graph()
+	currentSeqLen := tokens.Shape().Dimensions[1]
+
+	embedded := layers.Embedding(ctx.In("token_embed"), tokens, cfg.DType, cfg.VocabSize, cfg.EmbedDim)
+	if embedded.Rank() == 2 {
+		embedded = ExpandDims(embedded, 1)
+	}
+
+	x := embedded
+	if cfg.PosEmbed == nil {
+		// Absolute positional embeddings using DynamicSlice for tensor positions.
+		posEmbedFull := ctx.In("pos_embed").VariableWithShape("embeddings",
+			shapes.Make(cfg.DType, cfg.MaxPosEmbed, cfg.EmbedDim)).ValueGraph(g)
+
+		// Use the first element's position for slicing (all batch elements share the same slice).
+		// positions shape: [batchSize] int32
+		startPos := Reshape(Slice(ConvertDType(positions, dtypes.Int32), AxisElem(0))) // scalar
+		posEmbed := DynamicSlice(posEmbedFull, []*Node{startPos, Const(g, int32(0))}, []int{currentSeqLen, cfg.EmbedDim})
+		posEmbed = ExpandDims(posEmbed, 0)
+		posEmbed = BroadcastToShape(posEmbed, embedded.Shape())
+		x = Add(embedded, posEmbed)
+	}
+
+	for layer := range cfg.NumLayers {
+		layerCtx := ctx.In(fmt.Sprintf("layer_%d", layer))
+
+		residual := x
+		attnBuilder := attention.SelfAttention(layerCtx.In("attn"), x, cfg.NumHeads, cfg.HeadDim)
+
+		if kv != nil {
+			attnBuilder = attnBuilder.WithKVCacheAccessor(kv)
+		} else {
+			attnBuilder = attnBuilder.UseCausalMask()
+		}
+
+		if cfg.PosEmbed != nil {
+			attnBuilder = attnBuilder.WithPositionalEncoder(cfg.PosEmbed)
+		}
+		if !cfg.UseBias {
+			attnBuilder = attnBuilder.UseProjectionBias(false)
+		}
+		if cfg.Dropout > 0 {
+			attnBuilder = attnBuilder.Dropout(cfg.Dropout)
+		}
+
+		attn := attnBuilder.Done()
+
+		if cfg.UseLayerNorm {
+			x = layers.LayerNormalization(layerCtx.In("norm1"), Add(residual, attn), -1).Done()
+		} else {
+			x = Add(residual, attn)
+		}
+
+		residual = x
+		ff := layers.Dense(layerCtx.In("ff1"), x, cfg.UseBias, cfg.FFNDim)
+		ff = activations.Gelu(ff)
+		if cfg.Dropout > 0 {
+			ff = layers.Dropout(layerCtx.In("ff_dropout"), ff, Scalar(ff.Graph(), ff.DType(), cfg.Dropout))
+		}
+		ff = layers.Dense(layerCtx.In("ff2"), ff, cfg.UseBias, cfg.EmbedDim)
+
+		if cfg.UseLayerNorm {
+			x = layers.LayerNormalization(layerCtx.In("norm2"), Add(residual, ff), -1).Done()
+		} else {
+			x = Add(residual, ff)
+		}
+	}
+
+	logits := layers.Dense(ctx.In("output"), x, false, cfg.VocabSize)
+	return logits
+}
+
 // forwardFull: shared path for training and generation.
 func (m *Model) forwardFull(
 	ctx *context.Context,

@@ -142,6 +142,9 @@ var Capabilities = backends.Capabilities{
 		backends.OpTypeFusedScaledDotProductAttention: true,
 		backends.OpTypeFusedAttentionQKVProjection: true,
 
+		backends.OpTypeDynamicSlice:       true,
+		backends.OpTypeDynamicUpdateSlice: true,
+
 		// TODO: not implemented yet:
 		// backends.OpTypePad: true,
 		// backends.OpTypeSelectAndScatterMax: true,
@@ -151,8 +154,6 @@ var Capabilities = backends.Capabilities{
 		// backends.OpTypeShiftRightArithmetic: true,
 		// backends.OpTypeShiftRightLogical: true,
 		// backends.OpTypeBitcast: true,
-		// backends.OpTypeDynamicSlice: true,
-		// backends.OpTypeDynamicUpdateSlice: true,
 
 		// Lower priority ops:
 		// backends.OpTypeBatchNormForInference: true,

@@ -893,6 +893,120 @@ func (f *Function) Slice(operandOp backends.Value, starts, limits, strides []int
 	return node, nil
 }
 
+// normalizeStartIndices converts startIndices to individual scalar nodes.
+// If a single 1D tensor is passed (all indices packed), it is split into per-axis scalars
+// using Slice+Reshape. Otherwise, each element is verified to be a scalar.
+func (f *Function) normalizeStartIndices(startNodes []*Node, rank int) ([]*Node, error) {
+	if len(startNodes) == 1 && !startNodes[0].shape.IsScalar() && startNodes[0].shape.Rank() == 1 {
+		// Single 1D tensor: split into individual scalars.
+		expanded := make([]*Node, rank)
+		for i := range rank {
+			slicedVal, err := f.Slice(startNodes[0], []int{i}, []int{i + 1}, []int{1})
+			if err != nil {
+				return nil, errors.WithMessagef(err, "normalizeStartIndices: slicing axis %d", i)
+			}
+			reshapedVal, err := f.Reshape(slicedVal) // reshape to scalar (no dims)
+			if err != nil {
+				return nil, errors.WithMessagef(err, "normalizeStartIndices: reshaping axis %d to scalar", i)
+			}
+			expanded[i] = reshapedVal.(*Node)
+		}
+		return expanded, nil
+	}
+	// Already individual tensors (expected to be scalars).
+	if len(startNodes) != rank {
+		return nil, errors.Errorf("normalizeStartIndices: expected %d start indices, got %d", rank, len(startNodes))
+	}
+	return startNodes, nil
+}
+
+// DynamicSlice extracts a slice from the operand at the startIndices position with the given sliceDims.
+//
+// - operand: tensor from where to take the slice.
+// - startIndices: scalar tensors, one per axis of operand (or a single 1D tensor with all indices).
+// - sliceDims: static values specifying the size of the slice in each dimension.
+//
+// The startIndices are clamped: adjustedStart[i] = clamp(0, start[i], dims[i] - sliceDims[i]).
+func (f *Function) DynamicSlice(operandOp backends.Value, startIndicesOps []backends.Value, sliceDims []int) (backends.Value, error) {
+	opType := backends.OpTypeDynamicSlice
+	allInputs := make([]backends.Value, 0, 1+len(startIndicesOps))
+	allInputs = append(allInputs, operandOp)
+	allInputs = append(allInputs, startIndicesOps...)
+	inputs, err := f.verifyAndCastValues(opType.String(), allInputs...)
+	if err != nil {
+		return nil, err
+	}
+	operand := inputs[0]
+	rank := operand.shape.Rank()
+
+	startNodes, err := f.normalizeStartIndices(inputs[1:], rank)
+	if err != nil {
+		return nil, err
+	}
+
+	if len(sliceDims) != rank {
+		return nil, errors.Errorf("DynamicSlice: len(sliceDims)=%d != operand rank %d", len(sliceDims), rank)
+	}
+	for i, dim := range sliceDims {
+		if dim < 0 || dim > operand.shape.Dimensions[i] {
+			return nil, errors.Errorf("DynamicSlice: sliceDims[%d]=%d out of range [0, %d]", i, dim, operand.shape.Dimensions[i])
+		}
+	}
+
+	outputShape := shapes.Make(operand.shape.DType, sliceDims...)
+	data := &dynamicSliceNode{sliceDims: slices.Clone(sliceDims)}
+	nodeInputs := make([]*Node, 0, 1+len(startNodes))
+	nodeInputs = append(nodeInputs, operand)
+	nodeInputs = append(nodeInputs, startNodes...)
+	node, _ := f.getOrCreateNode(opType, outputShape, nodeInputs, data)
+	return node, nil
+}
+
+// DynamicUpdateSlice updates the operand with the values given in update, at the position given by startIndices.
+//
+// - operand: original value to be updated.
+// - update: values to "paste" on top of operand at startIndices.
+// - startIndices: scalar tensors, one per axis of operand (or a single 1D tensor with all indices).
+//
+// Returns a value with the same shape as the operand. The startIndices are clamped:
+//
+//	adjustedStart[i] = clamp(0, start[i], dims[i] - update.dims[i])
+func (f *Function) DynamicUpdateSlice(operandOp, updateOp backends.Value, startIndicesOps []backends.Value) (backends.Value, error) {
+	opType := backends.OpTypeDynamicUpdateSlice
+	allInputs := make([]backends.Value, 0, 2+len(startIndicesOps))
+	allInputs = append(allInputs, operandOp, updateOp)
+	allInputs = append(allInputs, startIndicesOps...)
+	inputs, err := f.verifyAndCastValues(opType.String(), allInputs...)
+	if err != nil {
+		return nil, err
+	}
+	operand := inputs[0]
+	update := inputs[1]
+	rank := operand.shape.Rank()
+
+	if update.shape.Rank() != rank {
+		return nil, errors.Errorf("DynamicUpdateSlice: update rank %d != operand rank %d", update.shape.Rank(), rank)
+	}
+	for i := range rank {
+		if update.shape.Dimensions[i] > operand.shape.Dimensions[i] {
+			return nil, errors.Errorf("DynamicUpdateSlice: update dim[%d]=%d > operand dim[%d]=%d",
+				i, update.shape.Dimensions[i], i, operand.shape.Dimensions[i])
+		}
+	}
+
+	startNodes, err := f.normalizeStartIndices(inputs[2:], rank)
+	if err != nil {
+		return nil, err
+	}
+
+	outputShape := operand.shape.Clone()
+	nodeInputs := make([]*Node, 0, 2+len(startNodes))
+	nodeInputs = append(nodeInputs, operand, update)
+	nodeInputs = append(nodeInputs, startNodes...)
+	node, _ := f.getOrCreateNode(opType, outputShape, nodeInputs, nil)
+	return node, nil
+}
+
 // RNGBitGenerator generates the given shape filled with random bits.
 // It takes as input the current random number generator (RNG) state, see RNGState or RNGStateFromSeed.
 // The algorithm is hard-coded to use Philox algorithm for now.
