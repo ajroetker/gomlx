@@ -146,8 +146,10 @@ func (e *Engine) preemptLowestPriority() uint64 {
 	return victimID
 }
 
-// removeLowestPriorityRequest finds the active request with the highest ID
-// (lowest priority), removes it from the request map, and returns it.
+// removeLowestPriorityRequest finds the active request with the least progress
+// (fewest generated tokens), removes it from the request map, and returns it.
+// This prevents restored requests (which retain low IDs) from being immune to
+// preemption, avoiding live-lock under sustained memory pressure.
 // Returns nil if no eligible request exists.
 func (e *Engine) removeLowestPriorityRequest() (*engineRequest, uint64) {
 	e.mu.Lock()
@@ -155,13 +157,16 @@ func (e *Engine) removeLowestPriorityRequest() (*engineRequest, uint64) {
 
 	var victim *engineRequest
 	var victimID uint64
+	victimProgress := -1
 	for id, req := range e.requests {
 		if req.eosReached || req.position == 0 {
 			continue
 		}
-		if victim == nil || id > victimID {
+		progress := len(req.generatedTokens)
+		if victim == nil || progress < victimProgress || (progress == victimProgress && id > victimID) {
 			victim = req
 			victimID = id
+			victimProgress = progress
 		}
 	}
 	if victim != nil {

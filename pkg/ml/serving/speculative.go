@@ -218,6 +218,9 @@ func (e *Engine) getVerifyExec() (*mlctx.Exec, error) {
 	if e.verifyExec != nil {
 		return e.verifyExec, nil
 	}
+	if e.batchedFn == nil {
+		return nil, fmt.Errorf("speculative decoding requires a BatchedModelFn (not supported with unified ModelFn path)")
+	}
 
 	var err error
 	e.verifyExec, err = mlctx.NewExec(e.backend, e.modelCtx.Reuse(),
