@@ -256,9 +256,9 @@ func recomputeGatherData(resolved []*Node, orig *Node) *gatherNode {
 
 	newData := &gatherNode{
 		indexVectorAxis:      origData.indexVectorAxis,
-		offsetOutputAxes:     origData.offsetOutputAxes,
-		collapsedSlicesAxes:  origData.collapsedSlicesAxes,
-		startIndexMap:        origData.startIndexMap,
+		offsetOutputAxes:     slices.Clone(origData.offsetOutputAxes),
+		collapsedSlicesAxes:  slices.Clone(origData.collapsedSlicesAxes),
+		startIndexMap:        slices.Clone(origData.startIndexMap),
 		sliceSizes:           slices.Clone(origData.sliceSizes),
 		indicesAreSorted:     origData.indicesAreSorted,
 	}
