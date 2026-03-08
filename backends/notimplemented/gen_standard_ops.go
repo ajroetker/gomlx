@@ -296,7 +296,7 @@ func (f Function) FusedLayerNorm(x backends.Value, axes []int, epsilon float64, 
 
 // FusedQuantizedDense performs fused dequantization + matmul + optional bias + optional activation.
 //
-// It computes y = activation(x @ dequant(weights, scales, zeroPoints) + bias), where the
+// It computes y = activation(x @ dequant(weights, weightsQuantization) + bias), where the
 // dequantization and matmul are fused into a single pass to avoid materializing the
 // full float32 weight matrix.
 //
@@ -305,27 +305,15 @@ func (f Function) FusedLayerNorm(x backends.Value, axes []int, epsilon float64, 
 //   - weights: [K, N] with dtype reflecting storage precision (e.g. Int4, Int8).
 //     For sub-byte types the caller should Bitcast packed uint8 data to the correct dtype
 //     before calling.
-//   - scales: [K, numBlocks] float32, where numBlocks = ceil(N / blockSize).
-//     Each scale covers a contiguous block of blockSize output columns for one row.
-//   - zeroPoints: [K, numBlocks] float32 (nil-able). Additive offset applied after
-//     scaling: float_value = int_value * scale + zeroPoint. Nil for symmetric / NF4.
 //   - bias: [N] float32 (nil-able), added after matmul but before activation.
-//
-// Parameters:
-//   - scheme: QuantLinear or QuantNF4.
-//   - blockAxis: the dimension of the weights tensor along which blocking is applied
-//     (typically 1, the output-features axis).
-//   - blockSize: number of output columns sharing a single scale factor.
+//   - weightsQuantization: describes how to dequantize the weights tensor. Must not be nil.
 //   - activation: applied after matmul+bias; set to ActivationNone for no activation.
-func (f Function) FusedQuantizedDense(x backends.Value, weights backends.Value, scales backends.Value, zeroPoints backends.Value, bias backends.Value, scheme backends.QuantizationScheme, blockAxis int, blockSize int, activation backends.ActivationType) (backends.Value, error) {
+//
+// Future: inputQuantization, outputQuantization, and biasQuantization parameters may be
+// added to support fully quantized operations where the activations and/or output are
+// also quantized.
+func (f Function) FusedQuantizedDense(x backends.Value, weights backends.Value, bias backends.Value, weightsQuantization *backends.Quantization, activation backends.ActivationType) (backends.Value, error) {
 	return nil, f.baseErrFn(backends.OpTypeFusedQuantizedDense)
-}
-
-// FusedQuantizedScaledDotProductAttention computes multi-head SDPA using int8×int8
-// matmuls for Q@K^T and attn@V. Inputs are float32; quantization is internal.
-// Same interface as FusedScaledDotProductAttention.
-func (f Function) FusedQuantizedScaledDotProductAttention(query backends.Value, key backends.Value, value backends.Value, mask backends.Value, numHeads int, numKVHeads int, axesLayout backends.AxesLayout, scale float64, causal bool) (backends.Value, error) {
-	return nil, f.baseErrFn(backends.OpTypeFusedQuantizedScaledDotProductAttention)
 }
 
 // FusedScaledDotProductAttention computes multi-head scaled dot-product attention.
@@ -352,9 +340,15 @@ func (f Function) FusedQuantizedScaledDotProductAttention(query backends.Value, 
 //   - causal: if true, apply causal (lower-triangular) mask. Callers (e.g. attention.Core)
 //     treat causal and mask as mutually exclusive, folding causal into the mask before calling
 //     this method when both are needed. Backends may assume they won't both be set.
+//   - quantizedMatmuls: if true, the backend may use per-head affine quantization
+//     (float32 → uint8) for the Q@K^T and attn@V matmul stages, computing accumulation
+//     in int32 and dequantizing back to float32. Softmax and masking remain in float32.
+//     This trades some numerical precision for throughput on hardware with fast integer
+//     dot-product instructions (e.g. ARM SDOT/UDOT, x86 VNNI). Backends that do not
+//     support quantized matmuls ignore this flag and use float arithmetic.
 //
 // Output: same shape as query.
-func (f Function) FusedScaledDotProductAttention(query backends.Value, key backends.Value, value backends.Value, mask backends.Value, numHeads int, numKVHeads int, axesLayout backends.AxesLayout, scale float64, causal bool) (backends.Value, error) {
+func (f Function) FusedScaledDotProductAttention(query backends.Value, key backends.Value, value backends.Value, mask backends.Value, numHeads int, numKVHeads int, axesLayout backends.AxesLayout, scale float64, causal bool, quantizedMatmuls bool) (backends.Value, error) {
 	return nil, f.baseErrFn(backends.OpTypeFusedScaledDotProductAttention)
 }
 
