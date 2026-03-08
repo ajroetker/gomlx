@@ -162,7 +162,7 @@ func TestUnifiedModelFnDecoder(t *testing.T) {
 
 		// ModelFn that returns logits strongly preferring token 5.
 		// It creates KV projections and writes them to the cache to exercise the full path.
-		var modelFn ModelFn = func(ctx *context.Context, tokens *Node, positions *Node, kv attention.KVCacheAccessor) *Node {
+		var modelFn ModelFn = func(ctx *context.Context, tokens *Node, positions *Node, kv attention.KVCacheAccessor, aux *AuxInputs) *Node {
 			batchSize := tokens.Shape().Dimensions[0]
 			seqLen := tokens.Shape().Dimensions[1]
 			g := tokens.Graph()
@@ -196,7 +196,7 @@ func TestUnifiedModelFnDecoder(t *testing.T) {
 		vocabSize := 10
 
 		// ModelFn without KV cache — falls back to full-sequence generation.
-		var modelFn ModelFn = func(ctx *context.Context, tokens *Node, positions *Node, kv attention.KVCacheAccessor) *Node {
+		var modelFn ModelFn = func(ctx *context.Context, tokens *Node, positions *Node, kv attention.KVCacheAccessor, aux *AuxInputs) *Node {
 			assert.Nil(t, kv, "kv should be nil when no cache config is set")
 			batchSize := tokens.Shape().Dimensions[0]
 			seqLen := tokens.Shape().Dimensions[1]
@@ -230,7 +230,7 @@ func TestUnifiedModelFnDecoder(t *testing.T) {
 		eosToken := 9
 
 		// ModelFn that always outputs EOS token → generation stops immediately.
-		var modelFn ModelFn = func(ctx *context.Context, tokens *Node, positions *Node, kv attention.KVCacheAccessor) *Node {
+		var modelFn ModelFn = func(ctx *context.Context, tokens *Node, positions *Node, kv attention.KVCacheAccessor, aux *AuxInputs) *Node {
 			batchSize := tokens.Shape().Dimensions[0]
 			seqLen := tokens.Shape().Dimensions[1]
 			g := tokens.Graph()

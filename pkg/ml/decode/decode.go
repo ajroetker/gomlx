@@ -80,6 +80,26 @@ type IncrementalModelFn func(ctx *context.Context, newTokens *Node, position int
 //   - logits: [batchSize, newLen, vocabSize]
 type BatchedModelFn func(ctx *context.Context, newTokens *Node, positions *Node) *Node
 
+// AuxInputs carries optional non-text inputs for multimodal models.
+// nil for text-only requests or decode steps. New modalities (audio, video,
+// etc.) can be added as fields without changing the ModelFn signature.
+type AuxInputs struct {
+	// ImageFeatures holds pre-computed vision encoder output during prefill,
+	// e.g. [1, numPatches, hiddenDim]. nil for text-only requests or decode steps.
+	ImageFeatures *Node
+
+	// InputsEmbeds holds pre-computed token embeddings [batch, seqLen, hiddenDim].
+	// When set, the ModelFn should use these instead of embedding the tokens
+	// parameter. This enables models whose embedding step contains operations
+	// incompatible with static graph compilation (e.g., NonZero).
+	InputsEmbeds *Node
+
+	// PerLayerInputs holds per-layer auxiliary inputs [batch, seqLen, numLayers, dim].
+	// Used by models like Gemma 3n that route different per-layer signals
+	// through the decoder alongside the primary embeddings.
+	PerLayerInputs *Node
+}
+
 // ModelFn is the unified model function type for serving.
 // Positions are always tensors (enabling O(1) compilation with dynamic shapes),
 // and the engine owns the KV cache layout via the KVCacheAccessor.
@@ -95,10 +115,12 @@ type BatchedModelFn func(ctx *context.Context, newTokens *Node, positions *Node)
 //   - kv: Engine-provided KV cache accessor. The model should call kv.WriteRead
 //     for each attention layer to store/retrieve cached projections.
 //     Nil during training or when KV caching is not used.
+//   - aux: Optional auxiliary inputs for multimodal models (images, audio, etc.).
+//     nil for text-only requests and decode steps.
 //
 // Returns:
 //   - logits: [batchSize, seqLen, vocabSize]
-type ModelFn func(ctx *context.Context, tokens *Node, positions *Node, kv attention.KVCacheAccessor) *Node
+type ModelFn func(ctx *context.Context, tokens *Node, positions *Node, kv attention.KVCacheAccessor, aux *AuxInputs) *Node
 
 // KVCacheConfig holds KV cache configuration for unified model generation.
 // Required when using ModelFn with the Decoder.
@@ -628,7 +650,7 @@ func (dec *Decoder) generateSamplingUnified(
 		dec.unifiedPromptExec, err = context.NewExec(backend, predCtx, func(ctx *context.Context, tokens *Node, positions *Node) *Node {
 			bs := tokens.Shape().Dimensions[0]
 			kv := attention.NewFlatKVCacheAccessor(bs, cfg.NumKVHeads, cfg.MaxSeqLen, cfg.HeadDim, cfg.DType, positions)
-			logits := dec.UnifiedModelFn(ctx, tokens, positions, kv)
+			logits := dec.UnifiedModelFn(ctx, tokens, positions, kv, nil)
 			lastLogits := Slice(logits, AxisRange(), AxisElem(-1), AxisRange())
 			lastLogits = Squeeze(lastLogits, 1) // [batch, vocab_size]
 			nextToken := sample.SampleWithStrategy(ctx, lastLogits, dec.Strategy, float64(dec.Temperature), dec.TopK, float64(dec.TopP))
@@ -686,7 +708,7 @@ func (dec *Decoder) generateSamplingUnified(
 			bs := token.Shape().Dimensions[0]
 			tokenReshaped := ExpandDims(token, -1) // [batch, 1]
 			kv := attention.NewFlatKVCacheAccessor(bs, cfg.NumKVHeads, cfg.MaxSeqLen, cfg.HeadDim, cfg.DType, positions)
-			logits := dec.UnifiedModelFn(ctx, tokenReshaped, positions, kv)
+			logits := dec.UnifiedModelFn(ctx, tokenReshaped, positions, kv, nil)
 			lastLogits := Squeeze(logits, 1)
 			nextToken := sample.SampleWithStrategy(ctx, lastLogits, dec.Strategy, float64(dec.Temperature), dec.TopK, float64(dec.TopP))
 			return nextToken
@@ -770,7 +792,7 @@ func (dec *Decoder) generateSamplingUnifiedFull(
 		dec.fullExec, err = context.NewExec(backend, predCtx, func(ctx *context.Context, currentSeq *Node) *Node {
 			positions := tensors.FromValue(make([]int32, batchSize))
 			posNode := Const(currentSeq.Graph(), positions)
-			logits := dec.UnifiedModelFn(ctx, currentSeq, posNode, nil)
+			logits := dec.UnifiedModelFn(ctx, currentSeq, posNode, nil, nil)
 			lastLogits := Slice(logits, AxisRange(), AxisElem(-1), AxisRange())
 			lastLogits = Squeeze(lastLogits, 1)
 			nextToken := sample.SampleWithStrategy(ctx, lastLogits, dec.Strategy, float64(dec.Temperature), dec.TopK, float64(dec.TopP))

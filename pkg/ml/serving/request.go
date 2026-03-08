@@ -4,6 +4,7 @@ import (
 	"context"
 	"time"
 
+	"github.com/gomlx/gomlx/pkg/core/tensors"
 	"github.com/gomlx/gomlx/pkg/ml/decode/sample"
 )
 
@@ -56,11 +57,29 @@ func DefaultRequestOptions() RequestOptions {
 	}
 }
 
+// AuxData carries optional non-text input data for multimodal requests.
+// nil for text-only requests. New modalities (audio, video, etc.) can be
+// added as fields without changing the Submit signature.
+type AuxData struct {
+	// ImageFeatures holds pre-computed vision encoder output,
+	// e.g. shape [1, numPatches, hiddenDim]. nil for text-only requests.
+	ImageFeatures *tensors.Tensor
+
+	// InputsEmbeds holds pre-computed token embeddings,
+	// e.g. shape [batch, seqLen, hiddenDim]. Populated by EmbedFn.
+	InputsEmbeds *tensors.Tensor
+
+	// PerLayerInputs holds per-layer auxiliary inputs,
+	// e.g. shape [batch, seqLen, numLayers, dim]. Populated by EmbedFn.
+	PerLayerInputs *tensors.Tensor
+}
+
 // engineRequest is the internal state for one in-flight generation request.
 type engineRequest struct {
 	id          uint64
 	inputTokens []int32
 	opts        RequestOptions
+	auxData     *AuxData // optional multimodal inputs (images, etc.)
 
 	outputChan chan SequenceDelta
 	errChan    chan error

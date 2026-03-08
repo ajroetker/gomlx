@@ -231,7 +231,7 @@ func (m *Model) ForGeneration() decode.IncrementalModelFn {
 // Positions are tensors (enabling O(1) compilation), and KV cache layout
 // is owned by the engine via the KVCacheAccessor.
 func (m *Model) ForUnifiedGeneration() decode.ModelFn {
-	return func(ctx *context.Context, tokens *Node, positions *Node, kv attention.KVCacheAccessor) *Node {
+	return func(ctx *context.Context, tokens *Node, positions *Node, kv attention.KVCacheAccessor, aux *decode.AuxInputs) *Node {
 		return m.forwardUnified(ctx, tokens, positions, kv)
 	}
 }
