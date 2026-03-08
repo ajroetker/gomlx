@@ -545,16 +545,22 @@ func backendToMatmulActivation(act backends.ActivationType) (matmul.ActivationTy
 }
 
 // execQuantizedDenseHighway implements SIMD-accelerated fused quantized dense.
-// inputs layout: [x, packedWeights, scales, bias?]
+// inputs layout: [x, weights, scales, zeroPoints?, bias?]
 func execQuantizedDenseHighway(backend *simplego.Backend, node *simplego.Node, inputs []*simplego.Buffer, inputsOwned []bool) (*simplego.Buffer, error) {
-	quantFormat, groupSize, outFeatures, act := simplego.QuantizedDenseParams(node)
+	scheme, blockSize, act, hasZeroPoint := simplego.QuantizedDenseParams(node)
 
 	x := inputs[0]
 	w := inputs[1]
 	s := inputs[2]
+
+	// Determine bias from remaining inputs using hasZeroPoint flag.
 	var bias *simplego.Buffer
-	if len(inputs) > 3 {
-		bias = inputs[3]
+	nextIdx := 3
+	if hasZeroPoint {
+		nextIdx++ // skip zeroPoints (not used by highway kernels)
+	}
+	if nextIdx < len(inputs) {
+		bias = inputs[nextIdx]
 	}
 
 	if x.DType() != dtypes.Float32 {
@@ -567,7 +573,8 @@ func execQuantizedDenseHighway(backend *simplego.Backend, node *simplego.Node, i
 	outData := output.Flat().([]float32)
 
 	K := x.Shape().Dimensions[x.Shape().Rank()-1]
-	N := outFeatures
+	outShape := simplego.FusedOpOutputShape(node)
+	N := outShape.Dimensions[outShape.Rank()-1]
 	M := x.Shape().Size() / K
 
 	var biasData []float32
@@ -577,36 +584,60 @@ func execQuantizedDenseHighway(backend *simplego.Backend, node *simplego.Node, i
 
 	matmulAct, actSupported := backendToMatmulActivation(act)
 
-	switch quantFormat {
+	switch scheme {
 	case backends.QuantNF4:
-		packed := w.Flat().([]uint8)
+		// Highway NF4 kernel expects packed nibbles (2 per byte).
+		// After Bitcast, data is unpacked (one nibble per uint8), so re-pack.
+		packed := packNibbles(w.Flat().([]uint8))
 		if actSupported && matmulAct != matmul.ActNone {
-			matmul.ParallelFusedNF4MatMulAct(hwyPool, xData, packed, scalesData, biasData, outData, M, K, N, groupSize, matmulAct)
+			matmul.ParallelFusedNF4MatMulAct(hwyPool, xData, packed, scalesData, biasData, outData, M, K, N, blockSize, matmulAct)
 		} else {
-			matmul.ParallelFusedNF4MatMul(hwyPool, xData, packed, scalesData, biasData, outData, M, K, N, groupSize)
+			matmul.ParallelFusedNF4MatMul(hwyPool, xData, packed, scalesData, biasData, outData, M, K, N, blockSize)
 			simplego.ApplyActivationFloat32(backend, outData, act)
 		}
-	case backends.QuantInt4:
-		packed := w.Flat().([]uint8)
-		if actSupported && matmulAct != matmul.ActNone {
-			matmul.ParallelFusedInt4MatMulAct(hwyPool, xData, packed, scalesData, biasData, outData, M, K, N, groupSize, matmulAct)
-		} else {
-			matmul.ParallelFusedInt4MatMul(hwyPool, xData, packed, scalesData, biasData, outData, M, K, N, groupSize)
-			simplego.ApplyActivationFloat32(backend, outData, act)
-		}
-	case backends.QuantInt8:
-		weights := w.Flat().([]int8)
-		if actSupported && matmulAct != matmul.ActNone {
-			matmul.ParallelFusedInt8MatMulAct(hwyPool, xData, weights, scalesData, biasData, outData, M, K, N, groupSize, matmulAct)
-		} else {
-			matmul.ParallelFusedInt8MatMul(hwyPool, xData, weights, scalesData, biasData, outData, M, K, N, groupSize)
-			simplego.ApplyActivationFloat32(backend, outData, act)
+	case backends.QuantLinear:
+		wDType := w.DType()
+		switch wDType {
+		case dtypes.Int4, dtypes.Uint4:
+			// Highway Int4 kernel expects packed nibbles (2 per byte).
+			packed := packNibbles(w.Flat().([]uint8))
+			if actSupported && matmulAct != matmul.ActNone {
+				matmul.ParallelFusedInt4MatMulAct(hwyPool, xData, packed, scalesData, biasData, outData, M, K, N, blockSize, matmulAct)
+			} else {
+				matmul.ParallelFusedInt4MatMul(hwyPool, xData, packed, scalesData, biasData, outData, M, K, N, blockSize)
+				simplego.ApplyActivationFloat32(backend, outData, act)
+			}
+		case dtypes.Int8:
+			weights := w.Flat().([]int8)
+			if actSupported && matmulAct != matmul.ActNone {
+				matmul.ParallelFusedInt8MatMulAct(hwyPool, xData, weights, scalesData, biasData, outData, M, K, N, blockSize, matmulAct)
+			} else {
+				matmul.ParallelFusedInt8MatMul(hwyPool, xData, weights, scalesData, biasData, outData, M, K, N, blockSize)
+				simplego.ApplyActivationFloat32(backend, outData, act)
+			}
+		default:
+			return nil, errors.Errorf("highway QuantizedDense: QuantLinear unsupported weight dtype %s", wDType)
 		}
 	default:
-		return nil, errors.Errorf("highway QuantizedDense: unknown quant format %d", quantFormat)
+		return nil, errors.Errorf("highway QuantizedDense: unknown quantization scheme %d", scheme)
 	}
 
 	return output, nil
+}
+
+// packNibbles re-packs unpacked nibble data (one value per uint8) into packed form
+// (two nibbles per byte, low nibble first). This is needed because the Bitcast
+// executor unpacks nibbles, but the go-highway matmul kernels expect packed data.
+func packNibbles(unpacked []uint8) []uint8 {
+	n := len(unpacked)
+	packed := make([]uint8, (n+1)/2)
+	for i := 0; i < n-1; i += 2 {
+		packed[i/2] = (unpacked[i] & 0x0F) | (unpacked[i+1] << 4)
+	}
+	if n%2 != 0 {
+		packed[n/2] = unpacked[n-1] & 0x0F
+	}
+	return packed
 }
 
 // execDenseActivationHighway implements SIMD-accelerated dense + activation: y = act(x @ W + b).

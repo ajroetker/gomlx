@@ -336,8 +336,6 @@ func BenchmarkQuantizedDense(b *testing.B) {
 		M, K, N := sz.batch, sz.inFeatures, sz.outFeatures
 		groupSize := sz.groupSize
 		numGroups := (N + groupSize - 1) / groupSize
-		packedN := (N + 1) / 2
-
 		xData := randomFloat32(M * K)
 		biasData := randomFloat32(N)
 		scalesData := randomFloat32(K * numGroups)
@@ -348,30 +346,30 @@ func BenchmarkQuantizedDense(b *testing.B) {
 		outShape := shapes.Make(dtypes.Float32, M, N)
 
 		// --- NF4 ---
-		nf4PackedData := randomUint8(K * packedN)
-		nf4PackedShape := shapes.Make(dtypes.Uint8, K, packedN)
+		nf4Data := randomUint8(K * N)
+		nf4Shape := shapes.Make(dtypes.Uint8, K, N)
 
 		nf4Fused := buildBenchExec(
-			[]shapes.Shape{xShape, nf4PackedShape, scalesShape, biasShape},
-			[]any{xData, nf4PackedData, scalesData, biasData},
+			[]shapes.Shape{xShape, nf4Shape, scalesShape, biasShape},
+			[]any{xData, nf4Data, scalesData, biasData},
 			func(f backends.Function, params []backends.Value) (backends.Value, error) {
-				return f.FusedQuantizedDense(params[0], params[1], params[2], params[3],
-					backends.QuantNF4, groupSize, N, backends.ActivationNone)
+				return f.FusedQuantizedDense(params[0], params[1], params[2], nil, params[3],
+					backends.QuantNF4, 1, groupSize, backends.ActivationNone)
 			})
 		b.Run(fmt.Sprintf("NF4/Fused/%s", sz.name), func(b *testing.B) { nf4Fused.run(b) })
 
-		// --- Int4 ---
-		int4PackedData := randomUint8(K * packedN)
-		int4PackedShape := shapes.Make(dtypes.Uint8, K, packedN)
+		// --- Linear Int8 (second set) ---
+		int4WeightsData := randomInt8(K * N)
+		int4WeightsShape := shapes.Make(dtypes.Int8, K, N)
 
 		int4Fused := buildBenchExec(
-			[]shapes.Shape{xShape, int4PackedShape, scalesShape, biasShape},
-			[]any{xData, int4PackedData, scalesData, biasData},
+			[]shapes.Shape{xShape, int4WeightsShape, scalesShape, biasShape},
+			[]any{xData, int4WeightsData, scalesData, biasData},
 			func(f backends.Function, params []backends.Value) (backends.Value, error) {
-				return f.FusedQuantizedDense(params[0], params[1], params[2], params[3],
-					backends.QuantInt4, groupSize, N, backends.ActivationNone)
+				return f.FusedQuantizedDense(params[0], params[1], params[2], nil, params[3],
+					backends.QuantLinear, 1, groupSize, backends.ActivationNone)
 			})
-		b.Run(fmt.Sprintf("Int4/Fused/%s", sz.name), func(b *testing.B) { int4Fused.run(b) })
+		b.Run(fmt.Sprintf("LinearInt8_2/Fused/%s", sz.name), func(b *testing.B) { int4Fused.run(b) })
 
 		// --- Int8 ---
 		int8WeightsData := randomInt8(K * N)
@@ -381,8 +379,8 @@ func BenchmarkQuantizedDense(b *testing.B) {
 			[]shapes.Shape{xShape, int8WeightsShape, scalesShape, biasShape},
 			[]any{xData, int8WeightsData, scalesData, biasData},
 			func(f backends.Function, params []backends.Value) (backends.Value, error) {
-				return f.FusedQuantizedDense(params[0], params[1], params[2], params[3],
-					backends.QuantInt8, groupSize, N, backends.ActivationNone)
+				return f.FusedQuantizedDense(params[0], params[1], params[2], nil, params[3],
+					backends.QuantLinear, 1, groupSize, backends.ActivationNone)
 			})
 		b.Run(fmt.Sprintf("Int8/Fused/%s", sz.name), func(b *testing.B) { int8Fused.run(b) })
 

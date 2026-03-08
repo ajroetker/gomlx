@@ -388,8 +388,8 @@ func TestHighwayQuantizedDense_Int8(t *testing.T) {
 			[]shapes.Shape{xShape, wShape, sShape, bShape},
 			[]any{x, weights, scales, bias},
 			func(f backends.Function, params []backends.Value) (backends.Value, error) {
-				return f.FusedQuantizedDense(params[0], params[1], params[2], params[3],
-					backends.QuantInt8, groupSize, N, backends.ActivationNone)
+				return f.FusedQuantizedDense(params[0], params[1], params[2], nil, params[3],
+					backends.QuantLinear, 1, groupSize, backends.ActivationNone)
 			},
 		).([]float32)
 
@@ -412,8 +412,8 @@ func TestHighwayQuantizedDense_Int8(t *testing.T) {
 			[]shapes.Shape{xShape, wShape, sShape},
 			[]any{x, weights, scales},
 			func(f backends.Function, params []backends.Value) (backends.Value, error) {
-				return f.FusedQuantizedDense(params[0], params[1], params[2], nil,
-					backends.QuantInt8, groupSize, N, backends.ActivationNone)
+				return f.FusedQuantizedDense(params[0], params[1], params[2], nil, nil,
+					backends.QuantLinear, 1, groupSize, backends.ActivationNone)
 			},
 		).([]float32)
 
@@ -435,8 +435,8 @@ func TestHighwayQuantizedDense_Int8(t *testing.T) {
 			[]shapes.Shape{xShape, wShape, sShape},
 			[]any{x, negWeights, scales},
 			func(f backends.Function, params []backends.Value) (backends.Value, error) {
-				return f.FusedQuantizedDense(params[0], params[1], params[2], nil,
-					backends.QuantInt8, groupSize, N, backends.ActivationRelu)
+				return f.FusedQuantizedDense(params[0], params[1], params[2], nil, nil,
+					backends.QuantLinear, 1, groupSize, backends.ActivationRelu)
 			},
 		).([]float32)
 
@@ -456,33 +456,30 @@ func TestHighwayQuantizedDense_NF4(t *testing.T) {
 	// NF4 lookup table values for reference:
 	// [0]=-1.0, [7]=0.0, [15]=1.0, [8]=0.0796...
 
-	// x: [1, 2], packed: [2, 1] (K=2, N=2 → packedN=1), scales: [2, 1]
+	// x: [1, 2], weights: [2, 2] (K=2, N=2), scales: [2, 1]
 	M, K, N := 1, 2, 2
 	groupSize := 2
 	numGroups := 1
 
 	x := []float32{1.0, 1.0}
 
-	// Pack: byte 0 = weight[0,0] in low nibble, weight[0,1] in high nibble
-	// Use index 15 (value 1.0) for [0,0] and index 0 (value -1.0) for [0,1]
-	// byte = 0x0F (low=15, high=0)
-	// byte 1 = weight[1,0] in low nibble, weight[1,1] in high nibble
-	// Use index 7 (value 0.0) for [1,0] and index 15 (value 1.0) for [1,1]
-	// byte = 0xF7 (low=7, high=15)
-	packed := []uint8{0x0F, 0xF7}
+	// Unpacked NF4 nibble indices (one per element):
+	// [0,0]=15 (value 1.0), [0,1]=0 (value -1.0)
+	// [1,0]=7 (value 0.0), [1,1]=15 (value 1.0)
+	weights := []uint8{15, 0, 7, 15}
 
 	scales := []float32{1.0, 1.0} // [K=2, numGroups=1]
 
 	xShape := shapes.Make(dtypes.Float32, M, K)
-	wShape := shapes.Make(dtypes.Uint8, K, (N+1)/2)
+	wShape := shapes.Make(dtypes.Uint8, K, N)
 	sShape := shapes.Make(dtypes.Float32, K, numGroups)
 
 	got := execFusedOpMulti(t,
 		[]shapes.Shape{xShape, wShape, sShape},
-		[]any{x, packed, scales},
+		[]any{x, weights, scales},
 		func(f backends.Function, params []backends.Value) (backends.Value, error) {
-			return f.FusedQuantizedDense(params[0], params[1], params[2], nil,
-				backends.QuantNF4, groupSize, N, backends.ActivationNone)
+			return f.FusedQuantizedDense(params[0], params[1], params[2], nil, nil,
+				backends.QuantNF4, 1, groupSize, backends.ActivationNone)
 		},
 	).([]float32)
 
@@ -502,31 +499,27 @@ func TestHighwayQuantizedDense_Int4(t *testing.T) {
 
 	x := []float32{2.0, 3.0}
 
-	// Pack: byte 0 = weight[0,0](low) + weight[0,1](high)
-	// Use nibble=9 (val=1) for [0,0], nibble=6 (val=-2) for [0,1]
-	// byte = (6 << 4) | 9 = 0x69
-	// byte 1 = weight[1,0](low) + weight[1,1](high)
-	// Use nibble=8 (val=0) for [1,0], nibble=10 (val=2) for [1,1]
-	// byte = (10 << 4) | 8 = 0xA8
-	packed := []uint8{0x69, 0xA8}
+	// Unpacked Int4 nibble values stored as int8 (one per element):
+	// [0,0]=1, [0,1]=-2, [1,0]=0, [1,1]=2
+	weights := []int8{1, -2, 0, 2}
 
 	scales := []float32{0.5, 0.5} // [K=2, numGroups=1]
 
 	xShape := shapes.Make(dtypes.Float32, M, K)
-	wShape := shapes.Make(dtypes.Uint8, K, (N+1)/2)
+	wShape := shapes.Make(dtypes.Int8, K, N)
 	sShape := shapes.Make(dtypes.Float32, K, numGroups)
 
 	got := execFusedOpMulti(t,
 		[]shapes.Shape{xShape, wShape, sShape},
-		[]any{x, packed, scales},
+		[]any{x, weights, scales},
 		func(f backends.Function, params []backends.Value) (backends.Value, error) {
-			return f.FusedQuantizedDense(params[0], params[1], params[2], nil,
-				backends.QuantInt4, groupSize, N, backends.ActivationNone)
+			return f.FusedQuantizedDense(params[0], params[1], params[2], nil, nil,
+				backends.QuantLinear, 1, groupSize, backends.ActivationNone)
 		},
 	).([]float32)
 
-	// n=0: x[0] * (9-8)*0.5 + x[1] * (8-8)*0.5 = 2.0*0.5 + 3.0*0.0 = 1.0
-	// n=1: x[0] * (6-8)*0.5 + x[1] * (10-8)*0.5 = 2.0*(-1.0) + 3.0*1.0 = 1.0
-	assert.InDelta(t, 1.0, got[0], 1e-4, "Int4 output[0]")
-	assert.InDelta(t, 1.0, got[1], 1e-4, "Int4 output[1]")
+	// n=0: x[0]*1*0.5 + x[1]*0*0.5 = 2.0*0.5 + 3.0*0.0 = 1.0
+	// n=1: x[0]*(-2)*0.5 + x[1]*2*0.5 = 2.0*(-1.0) + 3.0*1.0 = 1.0
+	assert.InDelta(t, 1.0, got[0], 1e-4, "Linear Int8 output[0]")
+	assert.InDelta(t, 1.0, got[1], 1e-4, "Linear Int8 output[1]")
 }

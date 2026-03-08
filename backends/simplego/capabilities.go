@@ -155,7 +155,9 @@ var Capabilities = backends.Capabilities{
 		// backends.OpTypeShiftLeft: true,
 		// backends.OpTypeShiftRightArithmetic: true,
 		// backends.OpTypeShiftRightLogical: true,
-		// backends.OpTypeBitcast: true,
+		backends.OpTypeBitcast: true,
+		// backends.OpTypeDynamicSlice: true,
+		// backends.OpTypeDynamicUpdateSlice: true,
 
 		// Lower priority ops:
 		// backends.OpTypeBatchNormForInference: true,
@@ -176,6 +178,8 @@ var Capabilities = backends.Capabilities{
 
 	DTypes: map[dtypes.DType]bool{
 		dtypes.Bool:     true,
+		dtypes.Int4:     true,
+		dtypes.Uint4:    true,
 		dtypes.Int8:     true,
 		dtypes.Int16:    true,
 		dtypes.Int32:    true,

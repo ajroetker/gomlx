@@ -95,9 +95,9 @@ func QuantizedSDPAParams(node *Node) (numHeads, numKVHeads int, axesLayout backe
 }
 
 // QuantizedDenseParams extracts the parameters from a FusedQuantizedDense node.
-func QuantizedDenseParams(node *Node) (quantFormat backends.QuantFormat, groupSize int, outFeatures int, activation backends.ActivationType) {
+func QuantizedDenseParams(node *Node) (scheme backends.QuantizationScheme, blockSize int, activation backends.ActivationType, hasZeroPoint bool) {
 	data := node.data.(*nodeFusedQuantizedDense)
-	return data.quantFormat, data.groupSize, data.outFeatures, data.activation
+	return data.scheme, data.blockSize, data.activation, data.hasZeroPoint
 }
 
 // TransposeBuffer transposes a buffer according to the given axis permutation.
