@@ -257,15 +257,20 @@ func (m *Model) forwardUnified(
 	x := embedded
 	if cfg.PosEmbed == nil {
 		// Absolute positional embeddings using DynamicSlice for tensor positions.
+		// Each batch element gets its own positional embedding slice based on its position.
 		posEmbedFull := ctx.In("pos_embed").VariableWithShape("embeddings",
 			shapes.Make(cfg.DType, cfg.MaxPosEmbed, cfg.EmbedDim)).ValueGraph(g)
 
-		// Use the first element's position for slicing (all batch elements share the same slice).
-		// positions shape: [batchSize] int32
-		startPos := Reshape(Slice(ConvertDType(positions, dtypes.Int32), AxisElem(0))) // scalar
-		posEmbed := DynamicSlice(posEmbedFull, []*Node{startPos, Const(g, int32(0))}, []int{currentSeqLen, cfg.EmbedDim})
-		posEmbed = ExpandDims(posEmbed, 0)
-		posEmbed = BroadcastToShape(posEmbed, embedded.Shape())
+		batchSize := tokens.Shape().Dimensions[0]
+		positionsI32 := ConvertDType(positions, dtypes.Int32)
+
+		posEmbedSlices := make([]*Node, batchSize)
+		for b := range batchSize {
+			startPos := Reshape(Slice(positionsI32, AxisElem(b))) // scalar
+			slice := DynamicSlice(posEmbedFull, []*Node{startPos, Const(g, int32(0))}, []int{currentSeqLen, cfg.EmbedDim})
+			posEmbedSlices[b] = ExpandDims(slice, 0) // [1, seqLen, embedDim]
+		}
+		posEmbed := Concatenate(posEmbedSlices, 0) // [batchSize, seqLen, embedDim]
 		x = Add(embedded, posEmbed)
 	}
 

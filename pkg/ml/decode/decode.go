@@ -408,7 +408,7 @@ func (dec *Decoder) WithKVCacheConfig(numKVHeads, headDim, maxSeqLen int, cacheD
 
 // isCached returns true if this decoder uses KV caching.
 func (dec *Decoder) isCached() bool {
-	return dec.IncrementalModelFn != nil
+	return dec.IncrementalModelFn != nil || (dec.UnifiedModelFn != nil && dec.kvCacheConfig != nil)
 }
 
 // validate checks that the decoder configuration is valid.
@@ -593,6 +593,9 @@ func (dec *Decoder) generateSamplingFull(
 		}
 	}
 
+	// Track per-element completion to avoid generating past EOS.
+	finished := make([]bool, batchSize)
+
 	for step := range numTokensToGenerate {
 		// Build current sequence tensor from accumulated tokens
 		currentSeq := tensors.FromValue(outputTokens)
@@ -606,15 +609,21 @@ func (dec *Decoder) generateSamplingFull(
 		nextTokenValues := nextToken.Value().([]int32)
 
 		// Check for EOS and append tokens
-		allEOS := true
+		allFinished := true
 		for i := range batchSize {
+			if finished[i] {
+				continue
+			}
 			outputTokens[i] = append(outputTokens[i], nextTokenValues[i])
-			if dec.StopOnEOS && dec.EosTokenId >= 0 && int(nextTokenValues[i]) != dec.EosTokenId {
-				allEOS = false
+			if dec.StopOnEOS && dec.EosTokenId >= 0 && int(nextTokenValues[i]) == dec.EosTokenId {
+				finished[i] = true
+			}
+			if !finished[i] {
+				allFinished = false
 			}
 		}
 
-		if dec.StopOnEOS && dec.EosTokenId >= 0 && allEOS {
+		if dec.StopOnEOS && dec.EosTokenId >= 0 && allFinished {
 			break
 		}
 	}
@@ -696,6 +705,16 @@ func (dec *Decoder) generateSamplingUnified(
 		outputTokens[i] = append(outputTokens[i], firstTokenValues[i])
 	}
 
+	// Track per-element completion for EOS stopping.
+	finishedUnified := make([]bool, batchSize)
+	if dec.StopOnEOS && dec.EosTokenId >= 0 {
+		for i := range batchSize {
+			if int(firstTokenValues[i]) == dec.EosTokenId {
+				finishedUnified[i] = true
+			}
+		}
+	}
+
 	numTokensToGenerate -= 1 // Already generated one token
 	if numTokensToGenerate <= 0 {
 		return tensors.FromValue(outputTokens), nil
@@ -744,16 +763,22 @@ func (dec *Decoder) generateSamplingUnified(
 		nextToken := outputs[0]
 		nextTokenValues := nextToken.Value().([]int32)
 
-		// Check for EOS and append tokens
-		allEOS := true
+		// Check for EOS and append tokens — track per-element completion.
+		allFinished := true
 		for i := range batchSize {
+			if finishedUnified[i] {
+				continue
+			}
 			outputTokens[i] = append(outputTokens[i], nextTokenValues[i])
-			if dec.StopOnEOS && dec.EosTokenId >= 0 && int(nextTokenValues[i]) != dec.EosTokenId {
-				allEOS = false
+			if dec.StopOnEOS && dec.EosTokenId >= 0 && int(nextTokenValues[i]) == dec.EosTokenId {
+				finishedUnified[i] = true
+			}
+			if !finishedUnified[i] {
+				allFinished = false
 			}
 		}
 
-		if dec.StopOnEOS && dec.EosTokenId >= 0 && allEOS {
+		if dec.StopOnEOS && dec.EosTokenId >= 0 && allFinished {
 			break
 		}
 	}
@@ -790,8 +815,11 @@ func (dec *Decoder) generateSamplingUnifiedFull(
 		predCtx := ctx.Reuse()
 		var err error
 		dec.fullExec, err = context.NewExec(backend, predCtx, func(ctx *context.Context, currentSeq *Node) *Node {
-			positions := tensors.FromValue(make([]int32, batchSize))
-			posNode := Const(currentSeq.Graph(), positions)
+			// Derive batchSize from the input node shape, not the outer scope,
+			// so the cached executor works for any batch size.
+			bs := currentSeq.Shape().Dimensions[0]
+			positions := make([]int32, bs)
+			posNode := Const(currentSeq.Graph(), tensors.FromValue(positions))
 			logits := dec.UnifiedModelFn(ctx, currentSeq, posNode, nil, nil)
 			lastLogits := Slice(logits, AxisRange(), AxisElem(-1), AxisRange())
 			lastLogits = Squeeze(lastLogits, 1)
@@ -803,6 +831,8 @@ func (dec *Decoder) generateSamplingUnifiedFull(
 		}
 	}
 
+	finishedFull := make([]bool, batchSize)
+
 	for step := range numTokensToGenerate {
 		currentSeq := tensors.FromValue(outputTokens)
 		outputs, err := dec.fullExec.Exec(currentSeq)
@@ -813,15 +843,21 @@ func (dec *Decoder) generateSamplingUnifiedFull(
 		nextToken := outputs[0]
 		nextTokenValues := nextToken.Value().([]int32)
 
-		allEOS := true
+		allFinished := true
 		for i := range batchSize {
+			if finishedFull[i] {
+				continue
+			}
 			outputTokens[i] = append(outputTokens[i], nextTokenValues[i])
-			if dec.StopOnEOS && dec.EosTokenId >= 0 && int(nextTokenValues[i]) != dec.EosTokenId {
-				allEOS = false
+			if dec.StopOnEOS && dec.EosTokenId >= 0 && int(nextTokenValues[i]) == dec.EosTokenId {
+				finishedFull[i] = true
+			}
+			if !finishedFull[i] {
+				allFinished = false
 			}
 		}
 
-		if dec.StopOnEOS && dec.EosTokenId >= 0 && allEOS {
+		if dec.StopOnEOS && dec.EosTokenId >= 0 && allFinished {
 			break
 		}
 	}
@@ -893,6 +929,16 @@ func (dec *Decoder) generateSamplingIncremental(
 		outputTokens[i] = append(outputTokens[i], firstTokenValues[i])
 	}
 
+	// Track per-element completion for EOS stopping.
+	finishedIncr := make([]bool, batchSize)
+	if dec.StopOnEOS && dec.EosTokenId >= 0 {
+		for i := range batchSize {
+			if int(firstTokenValues[i]) == dec.EosTokenId {
+				finishedIncr[i] = true
+			}
+		}
+	}
+
 	numTokensToGenerate := dec.MaxLength - promptLen - 1
 	if numTokensToGenerate <= 0 {
 		return tensors.FromValue(outputTokens), nil
@@ -941,16 +987,22 @@ func (dec *Decoder) generateSamplingIncremental(
 		nextToken := outputs[0]
 		nextTokenValues := nextToken.Value().([]int32)
 
-		// Check for EOS and append tokens
-		allEOS := true
+		// Check for EOS and append tokens — track per-element completion.
+		allFinished := true
 		for i := range batchSize {
+			if finishedIncr[i] {
+				continue
+			}
 			outputTokens[i] = append(outputTokens[i], nextTokenValues[i])
-			if dec.StopOnEOS && dec.EosTokenId >= 0 && int(nextTokenValues[i]) != dec.EosTokenId {
-				allEOS = false
+			if dec.StopOnEOS && dec.EosTokenId >= 0 && int(nextTokenValues[i]) == dec.EosTokenId {
+				finishedIncr[i] = true
+			}
+			if !finishedIncr[i] {
+				allFinished = false
 			}
 		}
 
-		if dec.StopOnEOS && dec.EosTokenId >= 0 && allEOS {
+		if dec.StopOnEOS && dec.EosTokenId >= 0 && allFinished {
 			break
 		}
 	}

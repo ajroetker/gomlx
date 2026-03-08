@@ -424,17 +424,14 @@ func (e *Engine) Stop() {
 	e.wg.Wait()
 
 	// Drain any requests that were queued after the loop exited.
+	// These requests were never added to e.requests, so finishAllRequests
+	// did not touch them. Use failRequest which safely closes channels.
 	e.submitMu.Lock()
 	defer e.submitMu.Unlock()
 	for {
 		select {
 		case req := <-e.submitCh:
-			select {
-			case req.errChan <- ErrEngineStopped:
-			default:
-			}
-			close(req.outputChan)
-			close(req.errChan)
+			e.failRequest(req, ErrEngineStopped)
 		default:
 			return
 		}

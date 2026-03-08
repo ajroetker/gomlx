@@ -9,6 +9,7 @@ import (
 	"github.com/gomlx/gomlx/pkg/core/shapes"
 	"github.com/gomlx/gomlx/pkg/core/tensors"
 	"github.com/gomlx/gomlx/pkg/ml/context"
+	. "github.com/gomlx/gomlx/pkg/support/exceptions"
 )
 
 // Paged KV cache errors.
@@ -319,6 +320,11 @@ func PagedKVCacheRead(ctx *context.Context, g *Graph, config PagedKVCacheConfig,
 //   - newKeys: [batchSize, NumKVHeads, 1, HeadDim] — new keys
 //   - newValues: [batchSize, NumKVHeads, 1, HeadDim] — new values
 func PagedKVCacheWriteBatched(ctx *context.Context, g *Graph, config PagedKVCacheConfig, pageTables *Node, positions *Node, newKeys, newValues *Node) {
+	newSeqLen := newKeys.Shape().Dimensions[2]
+	if newSeqLen != 1 {
+		Panicf("PagedKVCacheWriteBatched: newKeys seqLen must be 1, got %d; multi-token prefill is not supported", newSeqLen)
+	}
+
 	keyVar, valueVar := PagedKVCacheGetVars(ctx, config)
 	keyCache := keyVar.ValueGraph(g)
 	valueCache := valueVar.ValueGraph(g)

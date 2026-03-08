@@ -101,7 +101,6 @@ func (a *PagedKVCacheAccessor) WriteRead(ctx *context.Context, g *Graph, newKey,
 	PagedKVCacheWriteBatched(ctx, g, a.Config, a.PageTables, a.Positions, newKey, newValue)
 
 	batchSize := newKey.Shape().Dimensions[0]
-	seqLen := a.ReadNumBlocks * a.Config.BlockSize
 
 	// Read each batch element's blocks and stack.
 	allKeys := make([]*Node, batchSize)
@@ -115,8 +114,6 @@ func (a *PagedKVCacheAccessor) WriteRead(ctx *context.Context, g *Graph, newKey,
 
 	cachedKeys = Concatenate(allKeys, 0)   // [batchSize, numKVHeads, seqLen, headDim]
 	cachedValues = Concatenate(allValues, 0)
-
-	_ = seqLen
 	return
 }
 

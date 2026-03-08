@@ -162,16 +162,24 @@ func KVCacheUpdate(ctx *context.Context, g *Graph, cacheShape shapes.Shape, star
 	// Apply modulo for circular cache: write position = startPosition % maxSeqLen
 	cacheWritePos := ModScalar(position, maxSeqLen)
 
-	batchIdx := Const(g, int32(0))
+	batchSize := cacheShape.Dimensions[0]
 	headsIdx := Const(g, int32(0))
 	dimIdx := Const(g, int32(0))
 
-	keyCache, valueCache = kvCacheWriteElement(
-		keyCache, valueCache,
-		batchIdx, headsIdx, dimIdx, cacheWritePos,
-		newKeysSlice, newValuesSlice,
-		maxSeqLen, updateSeqLen,
-	)
+	for b := range batchSize {
+		batchIdxNode := Const(g, int32(b))
+
+		// Extract this batch element's new keys/values: [1, numHeads, seqLen, headDim]
+		batchKeys := Slice(newKeysSlice, AxisElem(b), AxisRange(), AxisRange(), AxisRange())
+		batchValues := Slice(newValuesSlice, AxisElem(b), AxisRange(), AxisRange(), AxisRange())
+
+		keyCache, valueCache = kvCacheWriteElement(
+			keyCache, valueCache,
+			batchIdxNode, headsIdx, dimIdx, cacheWritePos,
+			batchKeys, batchValues,
+			maxSeqLen, updateSeqLen,
+		)
+	}
 
 	// Update the cache variables
 	keyVar.SetValueGraph(keyCache)
