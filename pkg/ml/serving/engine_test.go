@@ -11,6 +11,7 @@ import (
 	"github.com/gomlx/gomlx/pkg/core/dtypes"
 	. "github.com/gomlx/gomlx/pkg/core/graph"
 	"github.com/gomlx/gomlx/pkg/core/shapes"
+	"github.com/gomlx/gomlx/pkg/core/tensors"
 	mlctx "github.com/gomlx/gomlx/pkg/ml/context"
 	"github.com/gomlx/gomlx/pkg/ml/decode"
 	"github.com/gomlx/gomlx/pkg/ml/decode/sample"
@@ -110,6 +111,7 @@ func TestEngineSubmitAndReceive(t *testing.T) {
 		context.Background(),
 		[]int32{1},
 		RequestOptions{MaxNewTokens: maxTokens, Strategy: sample.StrategyGreedy},
+		nil,
 	)
 	if err != nil {
 		t.Fatalf("Submit failed: %v", err)
@@ -151,6 +153,7 @@ func TestEngineEOS(t *testing.T) {
 		context.Background(),
 		[]int32{1},
 		RequestOptions{MaxNewTokens: 100, Strategy: sample.StrategyGreedy},
+		nil,
 	)
 	if err != nil {
 		t.Fatalf("Submit failed: %v", err)
@@ -202,6 +205,7 @@ func TestEngineContextCancellation(t *testing.T) {
 		ctx,
 		[]int32{1},
 		RequestOptions{MaxNewTokens: 100000, Strategy: sample.StrategyGreedy},
+		nil,
 	)
 	if err != nil {
 		t.Fatalf("Submit failed: %v", err)
@@ -232,6 +236,7 @@ func TestEngineStop(t *testing.T) {
 		context.Background(),
 		[]int32{1},
 		RequestOptions{MaxNewTokens: 100000, Strategy: sample.StrategyGreedy},
+		nil,
 	)
 	if err != nil {
 		t.Fatalf("Submit failed: %v", err)
@@ -254,6 +259,7 @@ func TestEngineStop(t *testing.T) {
 		context.Background(),
 		[]int32{1},
 		RequestOptions{MaxNewTokens: 5},
+		nil,
 	)
 	if err != ErrEngineStopped {
 		t.Errorf("Expected ErrEngineStopped, got %v", err)
@@ -270,6 +276,7 @@ func TestEngineMaxNewTokens(t *testing.T) {
 		context.Background(),
 		[]int32{1},
 		RequestOptions{MaxNewTokens: maxTokens, Strategy: sample.StrategyGreedy},
+		nil,
 	)
 	if err != nil {
 		t.Fatalf("Submit failed: %v", err)
@@ -305,6 +312,7 @@ func TestEngineConcurrentSubmit(t *testing.T) {
 				context.Background(),
 				[]int32{int32(i + 1)},
 				RequestOptions{MaxNewTokens: maxTokens, Strategy: sample.StrategyGreedy},
+				nil,
 			)
 			if err != nil {
 				errors <- err
@@ -343,6 +351,7 @@ func TestEngineEmptyPrompt(t *testing.T) {
 		context.Background(),
 		[]int32{},
 		DefaultRequestOptions(),
+		nil,
 	)
 	if err != ErrPromptEmpty {
 		t.Errorf("Expected ErrPromptEmpty, got %v", err)
@@ -352,6 +361,7 @@ func TestEngineEmptyPrompt(t *testing.T) {
 		context.Background(),
 		nil,
 		DefaultRequestOptions(),
+		nil,
 	)
 	if err != ErrPromptEmpty {
 		t.Errorf("Expected ErrPromptEmpty for nil, got %v", err)
@@ -448,6 +458,7 @@ func TestBatchedEngineSubmitAndReceive(t *testing.T) {
 		context.Background(),
 		[]int32{1},
 		RequestOptions{MaxNewTokens: maxTokens, Strategy: sample.StrategyGreedy},
+		nil,
 	)
 	if err != nil {
 		t.Fatalf("Submit failed: %v", err)
@@ -484,6 +495,7 @@ func TestBatchedEngineEOS(t *testing.T) {
 		context.Background(),
 		[]int32{1},
 		RequestOptions{MaxNewTokens: 100, Strategy: sample.StrategyGreedy},
+		nil,
 	)
 	if err != nil {
 		t.Fatalf("Submit failed: %v", err)
@@ -532,6 +544,7 @@ func TestBatchedEngineConcurrentSubmit(t *testing.T) {
 				context.Background(),
 				[]int32{int32(i + 1)},
 				RequestOptions{MaxNewTokens: maxTokens, Strategy: sample.StrategyGreedy},
+				nil,
 			)
 			if err != nil {
 				errors <- err
@@ -571,6 +584,7 @@ func TestBatchedEngineMaxNewTokens(t *testing.T) {
 		context.Background(),
 		[]int32{1},
 		RequestOptions{MaxNewTokens: maxTokens, Strategy: sample.StrategyGreedy},
+		nil,
 	)
 	if err != nil {
 		t.Fatalf("Submit failed: %v", err)
@@ -623,6 +637,7 @@ func TestSpeculativeDecodeIntegration(t *testing.T) {
 		context.Background(),
 		[]int32{1, 2},
 		RequestOptions{MaxNewTokens: maxTokens, Strategy: sample.StrategyGreedy},
+		nil,
 	)
 	if submitErr != nil {
 		t.Fatalf("Submit failed: %v", submitErr)
@@ -687,6 +702,7 @@ func TestPreemptionIntegration(t *testing.T) {
 		context.Background(),
 		[]int32{1, 2},
 		RequestOptions{MaxNewTokens: maxTokens, Strategy: sample.StrategyGreedy},
+		nil,
 	)
 	if err != nil {
 		t.Fatalf("First submit failed: %v", err)
@@ -706,6 +722,7 @@ func TestPreemptionIntegration(t *testing.T) {
 		context.Background(),
 		[]int32{4, 5},
 		RequestOptions{MaxNewTokens: maxTokens, Strategy: sample.StrategyGreedy},
+		nil,
 	)
 	if err != nil {
 		t.Fatalf("Second submit failed: %v", err)
@@ -765,6 +782,7 @@ func TestPrefixCacheIntegration(t *testing.T) {
 		context.Background(),
 		prompt,
 		RequestOptions{MaxNewTokens: maxTokens, Strategy: sample.StrategyGreedy},
+		nil,
 	)
 	if err != nil {
 		t.Fatalf("First submit failed: %v", err)
@@ -792,6 +810,7 @@ func TestPrefixCacheIntegration(t *testing.T) {
 		context.Background(),
 		prompt,
 		RequestOptions{MaxNewTokens: maxTokens, Strategy: sample.StrategyGreedy},
+		nil,
 	)
 	if err != nil {
 		t.Fatalf("Second submit failed: %v", err)
@@ -819,6 +838,7 @@ func TestPrefixCacheIntegration(t *testing.T) {
 		context.Background(),
 		[]int32{10, 20, 30},
 		RequestOptions{MaxNewTokens: maxTokens, Strategy: sample.StrategyGreedy},
+		nil,
 	)
 	if err != nil {
 		t.Fatalf("Third submit failed: %v", err)
@@ -847,7 +867,7 @@ func TestPrefixCacheIntegration(t *testing.T) {
 // makeConstantModelFn creates a ModelFn that always returns logits
 // where token ID `outputToken` has the highest value.
 func makeConstantModelFn(vocabSize int, outputToken int32) decode.ModelFn {
-	return func(ctx *mlctx.Context, tokens *Node, positions *Node, kv attention.KVCacheAccessor) *Node {
+	return func(ctx *mlctx.Context, tokens *Node, positions *Node, kv attention.KVCacheAccessor, aux *decode.AuxInputs) *Node {
 		g := tokens.Graph()
 		batchSize := tokens.Shape().Dimensions[0]
 		seqLen := tokens.Shape().Dimensions[1]
@@ -890,6 +910,7 @@ func TestNewEngineSubmitAndReceive(t *testing.T) {
 		context.Background(),
 		[]int32{1},
 		RequestOptions{MaxNewTokens: maxTokens, Strategy: sample.StrategyGreedy},
+		nil,
 	)
 	if err != nil {
 		t.Fatalf("Submit failed: %v", err)
@@ -932,6 +953,7 @@ func TestNewEngineConcurrentSubmit(t *testing.T) {
 				context.Background(),
 				[]int32{int32(i + 1)},
 				RequestOptions{MaxNewTokens: maxTokens, Strategy: sample.StrategyGreedy},
+				nil,
 			)
 			if err != nil {
 				errors <- err
@@ -958,5 +980,114 @@ func TestNewEngineConcurrentSubmit(t *testing.T) {
 
 	for err := range errors {
 		t.Errorf("Concurrent request error: %v", err)
+	}
+}
+
+// --- Multimodal Tests ---
+
+// makeMultimodalModelFn creates a ModelFn that uses image features when present.
+// When aux.ImageFeatures is provided, it prefers imageToken. When absent,
+// it prefers textToken.
+func makeMultimodalModelFn(vocabSize int, textToken, imageToken int32) decode.ModelFn {
+	return func(ctx *mlctx.Context, tokens *Node, positions *Node, kv attention.KVCacheAccessor, aux *decode.AuxInputs) *Node {
+		g := tokens.Graph()
+		batchSize := tokens.Shape().Dimensions[0]
+		seqLen := tokens.Shape().Dimensions[1]
+
+		// Default: prefer textToken.
+		target := textToken
+		if aux != nil && aux.ImageFeatures != nil {
+			// When image features are provided, prefer imageToken instead.
+			target = imageToken
+		}
+
+		logits := AddScalar(
+			Zeros(g, shapes.Make(dtypes.Float32, batchSize, seqLen, vocabSize)),
+			-1.0,
+		)
+		oneHot := OneHot(Const(g, target), vocabSize, dtypes.Float32)
+		oneHot = MulScalar(oneHot, 11.0)
+		oneHot = BroadcastPrefix(oneHot, batchSize, seqLen)
+		return Add(logits, oneHot)
+	}
+}
+
+func TestNewEngineMultimodalSubmit(t *testing.T) {
+	vocabSize := 10
+	textToken := int32(3)
+	imageToken := int32(7)
+	modelFn := makeMultimodalModelFn(vocabSize, textToken, imageToken)
+
+	backend, err := simplego.New("")
+	if err != nil {
+		t.Fatalf("Failed to create backend: %v", err)
+	}
+	ctx := mlctx.New()
+	tok := &mockTokenizer{eosID: -1}
+	config := DefaultConfig()
+	config.MaxSeqLen = 128
+	config.MaxBatchSize = 1
+	eng := NewEngine(backend, ctx, modelFn, tok, config, 1, 4, dtypes.Float32)
+	defer eng.Stop()
+
+	maxTokens := 3
+
+	// Text-only request — should produce textToken.
+	outCh, errCh, err := eng.Submit(
+		context.Background(),
+		[]int32{1, 2},
+		RequestOptions{MaxNewTokens: maxTokens, Strategy: sample.StrategyGreedy},
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("Text-only submit failed: %v", err)
+	}
+	var textDeltas []SequenceDelta
+	for d := range outCh {
+		textDeltas = append(textDeltas, d)
+	}
+	for err := range errCh {
+		t.Fatalf("Text-only error: %v", err)
+	}
+	if len(textDeltas) != maxTokens {
+		t.Fatalf("Text-only: expected %d deltas, got %d", maxTokens, len(textDeltas))
+	}
+	for i, d := range textDeltas {
+		if d.TokenID != textToken {
+			t.Errorf("Text-only delta %d: expected token %d, got %d", i, textToken, d.TokenID)
+		}
+	}
+
+	// Multimodal request — should produce imageToken during prefill,
+	// then textToken during decode (aux is cleared after prefill).
+	imageTensor := tensors.FromValue([][][]float32{{{1.0, 2.0, 3.0, 4.0}}}) // [1, 1, 4]
+	outCh, errCh, err = eng.Submit(
+		context.Background(),
+		[]int32{1, 2},
+		RequestOptions{MaxNewTokens: maxTokens, Strategy: sample.StrategyGreedy},
+		&AuxData{ImageFeatures: imageTensor},
+	)
+	if err != nil {
+		t.Fatalf("Multimodal submit failed: %v", err)
+	}
+	var mmDeltas []SequenceDelta
+	for d := range outCh {
+		mmDeltas = append(mmDeltas, d)
+	}
+	for err := range errCh {
+		t.Fatalf("Multimodal error: %v", err)
+	}
+	if len(mmDeltas) != maxTokens {
+		t.Fatalf("Multimodal: expected %d deltas, got %d", maxTokens, len(mmDeltas))
+	}
+	// First token (from prefill with image features) should be imageToken.
+	if mmDeltas[0].TokenID != imageToken {
+		t.Errorf("Multimodal prefill: expected token %d, got %d", imageToken, mmDeltas[0].TokenID)
+	}
+	// Subsequent tokens (from decode, no aux) should be textToken.
+	for i := 1; i < len(mmDeltas); i++ {
+		if mmDeltas[i].TokenID != textToken {
+			t.Errorf("Multimodal decode delta %d: expected token %d, got %d", i, textToken, mmDeltas[i].TokenID)
+		}
 	}
 }

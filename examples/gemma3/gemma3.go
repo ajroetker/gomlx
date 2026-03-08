@@ -236,6 +236,7 @@ func generateWithEngine(eng *serving.Engine, promptTokens []int32, maxTokens int
 		stdctx.Background(),
 		promptTokens,
 		serving.RequestOptions{MaxNewTokens: maxTokens},
+		nil,
 	)
 	if err != nil {
 		klog.Errorf("Submit failed: %v", err)
@@ -309,7 +310,7 @@ func makeModelFn(
 	// Fixed cache shape for context variables: [1, kvHeads, maxSeqLen, headDim].
 	cacheShape := shapes.Make(kv.kvDType, 1, kv.kvHeads, maxSeqLen, kv.headDim)
 
-	return func(ctx *context.Context, newTokens *Node, positions *Node, _ attention.KVCacheAccessor) *Node {
+	return func(ctx *context.Context, newTokens *Node, positions *Node, _ attention.KVCacheAccessor, _ *decode.AuxInputs) *Node {
 		g := newTokens.Graph()
 		seqLen := newTokens.Shape().Dimensions[1]
 

@@ -400,11 +400,6 @@ func (e *Engine) stepBatched() error {
 // On a cache miss, the full prompt is processed and the resulting blocks
 // are stored in the prefix cache for future reuse.
 func (e *Engine) prefillRequestBatched(req *engineRequest) error {
-	if err := e.initBatchedPromptExec(); err != nil {
-		e.finishRequest(req, fmt.Errorf("init batched prompt exec: %w", err))
-		return nil
-	}
-
 	promptTokens := req.inputTokens
 	startPos := int32(0)
 
@@ -414,9 +409,6 @@ func (e *Engine) prefillRequestBatched(req *engineRequest) error {
 			promptTokens = req.inputTokens[req.prefixLen:]
 			startPos = int32(req.prefixLen)
 		} else {
-			// Entire prompt is cached — run the model with the last prompt
-			// token to produce logits for the first generated token.
-			// The KV for previous positions is already in the cache.
 			promptTokens = req.inputTokens[len(req.inputTokens)-1:]
 			startPos = int32(len(req.inputTokens) - 1)
 		}
@@ -426,7 +418,49 @@ func (e *Engine) prefillRequestBatched(req *engineRequest) error {
 	prompt := tensors.FromValue([][]int32{promptTokens})
 	positions := tensors.FromValue([]int32{startPos})
 
-	outputs, err := e.batchedPromptExec.Exec(prompt, positions)
+	var outputs []*tensors.Tensor
+	var err error
+
+	if e.embedFn != nil {
+		// Eager embedding mode: call EmbedFn to convert tokens → embeddings.
+		auxData, embedErr := e.embedFn(prompt, req.auxData)
+		if embedErr != nil {
+			e.finishRequest(req, fmt.Errorf("embed fn: %w", embedErr))
+			return nil
+		}
+
+		hasPerLayer := auxData.PerLayerInputs != nil
+		if hasPerLayer {
+			if err := e.initEmbedPerLayerPromptExec(); err != nil {
+				e.finishRequest(req, fmt.Errorf("init embed+perLayer prompt exec: %w", err))
+				return nil
+			}
+			outputs, err = e.embedPerLayerPromptExec.Exec(auxData.InputsEmbeds, auxData.PerLayerInputs, positions)
+		} else {
+			if err := e.initEmbedPromptExec(); err != nil {
+				e.finishRequest(req, fmt.Errorf("init embed prompt exec: %w", err))
+				return nil
+			}
+			outputs, err = e.embedPromptExec.Exec(auxData.InputsEmbeds, positions)
+		}
+	} else {
+		// Standard mode: pass tokens directly to the compiled graph.
+		hasAux := req.auxData != nil && req.auxData.ImageFeatures != nil
+		if hasAux {
+			if err := e.initMultimodalPromptExec(); err != nil {
+				e.finishRequest(req, fmt.Errorf("init multimodal prompt exec: %w", err))
+				return nil
+			}
+			outputs, err = e.batchedMultimodalExec.Exec(prompt, positions, req.auxData.ImageFeatures)
+		} else {
+			if err := e.initBatchedPromptExec(); err != nil {
+				e.finishRequest(req, fmt.Errorf("init batched prompt exec: %w", err))
+				return nil
+			}
+			outputs, err = e.batchedPromptExec.Exec(prompt, positions)
+		}
+	}
+
 	if err != nil {
 		e.finishRequest(req, fmt.Errorf("batched prompt execution: %w", err))
 		return nil
@@ -440,6 +474,7 @@ func (e *Engine) prefillRequestBatched(req *engineRequest) error {
 	// Update request state.
 	req.position = len(req.inputTokens)
 	req.generatedTokens = append(req.generatedTokens, nextToken)
+	req.auxData = nil // release aux data after prefill — not needed during decode
 
 	// Stream token back.
 	e.streamToken(req, nextToken)
@@ -469,20 +504,48 @@ func (e *Engine) prefillRequestBatched(req *engineRequest) error {
 func (e *Engine) decodeBatched(b *batch) error {
 	padded := paddedBatchSize(len(b.requests))
 
-	exec, err := e.getBatchedDecodeExec(padded)
-	if err != nil {
-		// Fatal — can't create executor.
-		return fmt.Errorf("create batched decode exec (padded=%d): %w", padded, err)
-	}
-
 	// Build padded input tensors.
 	tokens, positions := buildPaddedTokens(b, padded)
 	tokensTensor := tensors.FromValue(tokens)
 	positionsTensor := tensors.FromValue(positions)
 
-	outputs, err := exec.Exec(tokensTensor, positionsTensor)
+	var outputs []*tensors.Tensor
+	var err error
+
+	if e.embedFn != nil {
+		// Eager embedding mode: call EmbedFn then use embed-mode executor.
+		auxData, embedErr := e.embedFn(tokensTensor, nil)
+		if embedErr != nil {
+			for _, req := range b.requests {
+				e.finishRequest(req, fmt.Errorf("decode embed fn: %w", embedErr))
+			}
+			return nil
+		}
+
+		hasPerLayer := auxData.PerLayerInputs != nil
+		if hasPerLayer {
+			exec, execErr := e.getEmbedPerLayerDecodeExec(padded)
+			if execErr != nil {
+				return fmt.Errorf("create embed+perLayer decode exec (padded=%d): %w", padded, execErr)
+			}
+			outputs, err = exec.Exec(auxData.InputsEmbeds, auxData.PerLayerInputs, positionsTensor)
+		} else {
+			exec, execErr := e.getEmbedDecodeExec(padded)
+			if execErr != nil {
+				return fmt.Errorf("create embed decode exec (padded=%d): %w", padded, execErr)
+			}
+			outputs, err = exec.Exec(auxData.InputsEmbeds, positionsTensor)
+		}
+	} else {
+		// Standard mode: pass tokens directly.
+		exec, execErr := e.getBatchedDecodeExec(padded)
+		if execErr != nil {
+			return fmt.Errorf("create batched decode exec (padded=%d): %w", padded, execErr)
+		}
+		outputs, err = exec.Exec(tokensTensor, positionsTensor)
+	}
+
 	if err != nil {
-		// Report error to all requests in batch, but don't treat as fatal.
 		for _, req := range b.requests {
 			e.finishRequest(req, fmt.Errorf("batched decode step: %w", err))
 		}

@@ -3,6 +3,7 @@ package serving
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -10,6 +11,7 @@ import (
 	"github.com/gomlx/gomlx/backends"
 	"github.com/gomlx/gomlx/pkg/core/dtypes"
 	. "github.com/gomlx/gomlx/pkg/core/graph"
+	"github.com/gomlx/gomlx/pkg/core/tensors"
 	mlctx "github.com/gomlx/gomlx/pkg/ml/context"
 	"github.com/gomlx/gomlx/pkg/ml/decode"
 	"github.com/gomlx/gomlx/pkg/ml/decode/sample"
@@ -23,6 +25,24 @@ var (
 	// ErrPromptEmpty is returned by Submit when the input tokens slice is empty.
 	ErrPromptEmpty = errors.New("prompt is empty")
 )
+
+// EmbedFn converts token IDs to embeddings eagerly, outside the compiled graph.
+// The engine calls this before every forward pass (prefill and decode).
+//
+// This enables models whose embedding step contains operations incompatible
+// with static graph compilation (e.g., ONNX NonZero for data-dependent shapes).
+// The returned AuxData must have InputsEmbeds populated; PerLayerInputs is
+// optional and model-specific.
+//
+// Parameters:
+//   - tokens: [batchSize, seqLen] int32 token IDs to embed.
+//   - auxData: request-level data (e.g., image features for multimodal prefill).
+//     nil for decode steps and text-only prefill.
+//
+// The EmbedFn implementation is responsible for its own executor caching and
+// efficiency. For decode (seqLen=1), implementations should use a cached
+// native embedding lookup rather than recompiling per token.
+type EmbedFn func(tokens *tensors.Tensor, auxData *AuxData) (*AuxData, error)
 
 // Config holds engine configuration.
 type Config struct {
@@ -131,8 +151,16 @@ type Engine struct {
 	genExecCache map[int]*mlctx.Exec
 
 	// Cached executors — batched mode (keyed by paddedBatchSize).
-	batchedPromptExec      *mlctx.Exec
-	batchedDecodeExecCache map[int]*mlctx.Exec // paddedBatchSize → exec
+	batchedPromptExec          *mlctx.Exec
+	batchedMultimodalExec      *mlctx.Exec            // prefill with aux inputs (images, etc.)
+	batchedDecodeExecCache     map[int]*mlctx.Exec     // paddedBatchSize → exec
+
+	// Eager embedding support.
+	embedFn                    EmbedFn                 // optional eager embedding function
+	embedPromptExec            *mlctx.Exec             // prefill with pre-computed embeddings
+	embedPerLayerPromptExec    *mlctx.Exec             // prefill with embeddings + per-layer inputs
+	embedDecodeExecCache       map[int]*mlctx.Exec     // decode with pre-computed embeddings
+	embedPerLayerDecodeCache   map[int]*mlctx.Exec     // decode with embeddings + per-layer inputs
 }
 
 // New creates and starts a new Engine. The background step loop begins
@@ -282,6 +310,15 @@ func NewEngine(
 	return e
 }
 
+// SetEmbedFn sets the eager embedding function. Must be called before
+// submitting any requests. When set, the engine calls embedFn before every
+// forward pass to convert token IDs to embeddings outside the compiled graph.
+func (e *Engine) SetEmbedFn(fn EmbedFn) {
+	e.embedFn = fn
+	e.embedDecodeExecCache = make(map[int]*mlctx.Exec)
+	e.embedPerLayerDecodeCache = make(map[int]*mlctx.Exec)
+}
+
 // newBatchedEngine creates a batched Engine with common initialization shared
 // by NewBatched and NewPaged. The caller must start the step loop.
 func newBatchedEngine(
@@ -327,10 +364,14 @@ func newBatchedEngine(
 // The context controls cancellation: if ctx is cancelled, the engine will
 // stop generating for this request, send the context error on errChan,
 // and close both channels.
+//
+// auxData carries optional multimodal inputs (e.g., pre-computed image
+// features from a vision encoder). Pass nil for text-only requests.
 func (e *Engine) Submit(
 	ctx context.Context,
 	inputTokens []int32,
 	opts RequestOptions,
+	auxData *AuxData,
 ) (<-chan SequenceDelta, <-chan error, error) {
 	if len(inputTokens) == 0 {
 		return nil, nil, ErrPromptEmpty
@@ -346,6 +387,7 @@ func (e *Engine) Submit(
 	req := &engineRequest{
 		inputTokens: make([]int32, len(inputTokens)),
 		opts:        opts,
+		auxData:     auxData,
 		outputChan:  outputChan,
 		errChan:     errChan,
 		ctx:         ctx,
@@ -493,7 +535,7 @@ func (e *Engine) initBatchedPromptExec() error {
 			func(ctx *mlctx.Context, tokens *Node, positions *Node) *Node {
 				bs := tokens.Shape().Dimensions[0]
 				kv := attention.NewFlatKVCacheAccessor(bs, cfg.NumKVHeads, cfg.MaxSeqLen, cfg.HeadDim, cfg.DType, positions)
-				logits := e.unifiedFn(ctx, tokens, positions, kv)
+				logits := e.unifiedFn(ctx, tokens, positions, kv, nil)
 				lastLogits := Slice(logits, AxisRange(), AxisElem(-1), AxisRange())
 				lastLogits = Squeeze(lastLogits, 1)
 				return lastLogits
@@ -510,6 +552,135 @@ func (e *Engine) initBatchedPromptExec() error {
 		)
 	}
 	return err
+}
+
+// initMultimodalPromptExec lazily initializes the multimodal prompt executor.
+// This is a separate compiled executor from the text-only prompt executor because
+// it takes an additional imageFeatures tensor input. Only used with unifiedFn.
+func (e *Engine) initMultimodalPromptExec() error {
+	if e.batchedMultimodalExec != nil {
+		return nil
+	}
+	if e.unifiedFn == nil {
+		return fmt.Errorf("multimodal prefill requires a unified ModelFn")
+	}
+
+	cfg := e.unifiedKVConfig
+	var err error
+	e.batchedMultimodalExec, err = mlctx.NewExec(e.backend, e.modelCtx.Reuse(),
+		func(ctx *mlctx.Context, tokens *Node, positions *Node, imageFeatures *Node) *Node {
+			bs := tokens.Shape().Dimensions[0]
+			kv := attention.NewFlatKVCacheAccessor(bs, cfg.NumKVHeads, cfg.MaxSeqLen, cfg.HeadDim, cfg.DType, positions)
+			aux := &decode.AuxInputs{ImageFeatures: imageFeatures}
+			logits := e.unifiedFn(ctx, tokens, positions, kv, aux)
+			lastLogits := Slice(logits, AxisRange(), AxisElem(-1), AxisRange())
+			lastLogits = Squeeze(lastLogits, 1)
+			return lastLogits
+		},
+	)
+	return err
+}
+
+// initEmbedPromptExec lazily initializes the prompt executor for embed mode
+// (without per-layer inputs). Takes (inputsEmbeds, positions) as inputs.
+func (e *Engine) initEmbedPromptExec() error {
+	if e.embedPromptExec != nil {
+		return nil
+	}
+	if e.unifiedFn == nil {
+		return fmt.Errorf("embed mode requires a unified ModelFn")
+	}
+
+	cfg := e.unifiedKVConfig
+	var err error
+	e.embedPromptExec, err = mlctx.NewExec(e.backend, e.modelCtx.Reuse(),
+		func(ctx *mlctx.Context, inputsEmbeds *Node, positions *Node) *Node {
+			bs := inputsEmbeds.Shape().Dimensions[0]
+			kv := attention.NewFlatKVCacheAccessor(bs, cfg.NumKVHeads, cfg.MaxSeqLen, cfg.HeadDim, cfg.DType, positions)
+			aux := &decode.AuxInputs{InputsEmbeds: inputsEmbeds}
+			logits := e.unifiedFn(ctx, inputsEmbeds, positions, kv, aux)
+			lastLogits := Slice(logits, AxisRange(), AxisElem(-1), AxisRange())
+			lastLogits = Squeeze(lastLogits, 1)
+			return lastLogits
+		},
+	)
+	return err
+}
+
+// initEmbedPerLayerPromptExec lazily initializes the prompt executor for embed
+// mode with per-layer inputs. Takes (inputsEmbeds, perLayerInputs, positions).
+func (e *Engine) initEmbedPerLayerPromptExec() error {
+	if e.embedPerLayerPromptExec != nil {
+		return nil
+	}
+	if e.unifiedFn == nil {
+		return fmt.Errorf("embed mode requires a unified ModelFn")
+	}
+
+	cfg := e.unifiedKVConfig
+	var err error
+	e.embedPerLayerPromptExec, err = mlctx.NewExec(e.backend, e.modelCtx.Reuse(),
+		func(ctx *mlctx.Context, inputsEmbeds *Node, perLayerInputs *Node, positions *Node) *Node {
+			bs := inputsEmbeds.Shape().Dimensions[0]
+			kv := attention.NewFlatKVCacheAccessor(bs, cfg.NumKVHeads, cfg.MaxSeqLen, cfg.HeadDim, cfg.DType, positions)
+			aux := &decode.AuxInputs{InputsEmbeds: inputsEmbeds, PerLayerInputs: perLayerInputs}
+			logits := e.unifiedFn(ctx, inputsEmbeds, positions, kv, aux)
+			lastLogits := Slice(logits, AxisRange(), AxisElem(-1), AxisRange())
+			lastLogits = Squeeze(lastLogits, 1)
+			return lastLogits
+		},
+	)
+	return err
+}
+
+// getEmbedDecodeExec returns a cached decode executor for embed mode (no per-layer).
+func (e *Engine) getEmbedDecodeExec(paddedBatch int) (*mlctx.Exec, error) {
+	if exec, ok := e.embedDecodeExecCache[paddedBatch]; ok {
+		return exec, nil
+	}
+
+	cfg := e.unifiedKVConfig
+	exec, err := mlctx.NewExec(e.backend, e.modelCtx.Reuse(),
+		func(ctx *mlctx.Context, inputsEmbeds *Node, positions *Node) *Node {
+			bs := inputsEmbeds.Shape().Dimensions[0]
+			kv := attention.NewFlatKVCacheAccessor(bs, cfg.NumKVHeads, cfg.MaxSeqLen, cfg.HeadDim, cfg.DType, positions)
+			aux := &decode.AuxInputs{InputsEmbeds: inputsEmbeds}
+			logits := e.unifiedFn(ctx, inputsEmbeds, positions, kv, aux)
+			lastLogits := Squeeze(logits, 1)
+			sampled := sample.Greedy(lastLogits)
+			return sampled
+		},
+	)
+	if err != nil {
+		return nil, err
+	}
+	e.embedDecodeExecCache[paddedBatch] = exec
+	return exec, nil
+}
+
+// getEmbedPerLayerDecodeExec returns a cached decode executor for embed mode with per-layer inputs.
+func (e *Engine) getEmbedPerLayerDecodeExec(paddedBatch int) (*mlctx.Exec, error) {
+	if exec, ok := e.embedPerLayerDecodeCache[paddedBatch]; ok {
+		return exec, nil
+	}
+
+	cfg := e.unifiedKVConfig
+	exec, err := mlctx.NewExec(e.backend, e.modelCtx.Reuse(),
+		func(ctx *mlctx.Context, inputsEmbeds *Node, perLayerInputs *Node, positions *Node) *Node {
+			bs := inputsEmbeds.Shape().Dimensions[0]
+			kv := attention.NewFlatKVCacheAccessor(bs, cfg.NumKVHeads, cfg.MaxSeqLen, cfg.HeadDim, cfg.DType, positions)
+			aux := &decode.AuxInputs{InputsEmbeds: inputsEmbeds, PerLayerInputs: perLayerInputs}
+			logits := e.unifiedFn(ctx, inputsEmbeds, positions, kv, aux)
+			lastLogits := Squeeze(logits, 1)
+			sampled := sample.Greedy(lastLogits)
+			return sampled
+		},
+	)
+	if err != nil {
+		return nil, err
+	}
+	e.embedPerLayerDecodeCache[paddedBatch] = exec
+	return exec, nil
 }
 
 // getBatchedDecodeExec returns a cached decode executor for the given padded
@@ -531,7 +702,7 @@ func (e *Engine) getBatchedDecodeExec(paddedBatch int) (*mlctx.Exec, error) {
 			func(ctx *mlctx.Context, tokens *Node, positions *Node) *Node {
 				bs := tokens.Shape().Dimensions[0]
 				kv := attention.NewFlatKVCacheAccessor(bs, cfg.NumKVHeads, cfg.MaxSeqLen, cfg.HeadDim, cfg.DType, positions)
-				logits := e.unifiedFn(ctx, tokens, positions, kv)
+				logits := e.unifiedFn(ctx, tokens, positions, kv, nil)
 				lastLogits := Squeeze(logits, 1)
 				sampled := sample.Greedy(lastLogits)
 				return sampled
