@@ -468,9 +468,9 @@ type kvStructure struct {
 	outputKeyIndices []int
 	// outputValueIndices are indices into the model's output list for the present value tensors.
 	outputValueIndices []int
-	logitsIndex        int        // index of logits in model.Outputs()
-	kvHeads            int        // number of KV attention heads
-	headDim            int        // head dimension
+	logitsIndex        int          // index of logits in model.Outputs()
+	kvHeads            int          // number of KV attention heads
+	headDim            int          // head dimension
 	kvDType            dtypes.DType // dtype for KV cache (e.g. Float32 or Float16)
 }
 
