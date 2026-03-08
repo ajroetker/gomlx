@@ -11,6 +11,24 @@ import (
 	"github.com/gomlx/gomlx/backends"
 )
 
+// isExpensiveOp returns whether a node is computationally expensive enough to
+// warrant dispatching as a separate goroutine in parallel execution mode.
+// Cheap ops (Reshape, Add, Mul, etc.) run inline to avoid goroutine scheduling overhead.
+func isExpensiveOp(node *Node) bool {
+	switch node.opType {
+	case backends.OpTypeDotGeneral,
+		backends.OpTypeConvGeneral,
+		backends.OpTypeFusedDense,
+		backends.OpTypeFusedScaledDotProductAttention,
+		backends.OpTypeFusedAttentionQKVProjection,
+		backends.OpTypeFusedQuantizedDense,
+		backends.OpTypeFusedQuantizedScaledDotProductAttention:
+		return true
+	default:
+		return false
+	}
+}
+
 // FunctionExecutable contains pre-compiled execution information for any function.
 // This is used for both the main function and closures, unifying their execution model.
 type FunctionExecutable struct {
@@ -407,7 +425,11 @@ func (fe *FunctionExecutable) executeParallel(backend *Backend, execBuf *funcExe
 			}
 		}
 
-		backend.workers.WaitToStart(nodeExecFn)
+		if isExpensiveOp(nodes[nodeIdx]) {
+			backend.workers.WaitToStart(nodeExecFn)
+		} else {
+			nodeExecFn()
+		}
 	}
 
 	if len(collectErrors) > 0 {
