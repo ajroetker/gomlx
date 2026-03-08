@@ -21,8 +21,7 @@ func isExpensiveOp(node *Node) bool {
 		backends.OpTypeFusedDense,
 		backends.OpTypeFusedScaledDotProductAttention,
 		backends.OpTypeFusedAttentionQKVProjection,
-		backends.OpTypeFusedQuantizedDense,
-		backends.OpTypeFusedQuantizedScaledDotProductAttention:
+		backends.OpTypeFusedQuantizedDense:
 		return true
 	default:
 		return false

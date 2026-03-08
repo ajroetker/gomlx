@@ -63,6 +63,11 @@ func SDPAParams(node *Node) (numHeads, numKVHeads int, axesLayout backends.AxesL
 	return data.numHeads, data.numKVHeads, data.axesLayout, data.scale, data.causal
 }
 
+// SDPAQuantizedMatmuls returns whether quantized matmuls are requested for an SDPA node.
+func SDPAQuantizedMatmuls(node *Node) bool {
+	return node.data.(*nodeFusedScaledDotProductAttention).quantizedMatmuls
+}
+
 // QKVProjectionParams extracts the parameters from a FusedAttentionQKVProjection node.
 func QKVProjectionParams(node *Node) (qDim, kvDim int, hasBiasQ, hasBiasK, hasBiasV bool) {
 	data := node.data.(*nodeFusedAttentionQKVProjection)
@@ -86,12 +91,6 @@ func QKVProjectionOutputBuffers(backend *Backend, node *Node) (q, k, v *Buffer) 
 		panic(fmt.Sprintf("QKVProjectionOutputBuffers (v): %v", err))
 	}
 	return q, k, v
-}
-
-// QuantizedSDPAParams extracts the parameters from a FusedQuantizedScaledDotProductAttention node.
-func QuantizedSDPAParams(node *Node) (numHeads, numKVHeads int, axesLayout backends.AxesLayout, scale float64, causal bool) {
-	data := node.data.(*nodeFusedQuantizedScaledDotProductAttention)
-	return data.numHeads, data.numKVHeads, data.axesLayout, data.scale, data.causal
 }
 
 // QuantizedDenseParams extracts the parameters from a FusedQuantizedDense node.

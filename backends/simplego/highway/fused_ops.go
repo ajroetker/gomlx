@@ -22,7 +22,6 @@ func init() {
 	simplego.SetNodeExecutor(backends.OpTypeFusedDense, simplego.RegisterPriorityArch, execDenseActivationHighway)
 	simplego.SetNodeExecutor(backends.OpTypeFusedScaledDotProductAttention, simplego.RegisterPriorityArch, execSDPAHighway)
 	simplego.SetNodeExecutor(backends.OpTypeFusedQuantizedDense, simplego.RegisterPriorityArch, execQuantizedDenseHighway)
-	simplego.SetNodeExecutor(backends.OpTypeFusedQuantizedScaledDotProductAttention, simplego.RegisterPriorityArch, execQuantizedSDPAHighway)
 	simplego.SetMultiOutputsNodeExecutor(backends.OpTypeFusedAttentionQKVProjection, simplego.RegisterPriorityArch, execQKVProjectionHighway)
 }
 
@@ -314,6 +313,9 @@ func computeMaskStrides(dims []int) (batchStride, headStride int) {
 // the contiguous kernel with zero overhead. For BSHD it gathers each head into a
 // contiguous temp buffer, runs the optimized single-head SDPA, and scatters back.
 func execSDPAHighway(backend *simplego.Backend, node *simplego.Node, inputs []*simplego.Buffer, inputsOwned []bool) (*simplego.Buffer, error) {
+	if simplego.SDPAQuantizedMatmuls(node) {
+		return execQuantizedSDPAHighway(backend, node, inputs, inputsOwned)
+	}
 	numHeads, numKVHeads, axesLayout, scale, causal := simplego.SDPAParams(node)
 
 	q := inputs[0]
@@ -418,7 +420,7 @@ func execSDPAHighway(backend *simplego.Backend, node *simplego.Node, inputs []*s
 // Inputs are float32 Q/K/V; the go-highway kernel internally quantizes to uint8 for
 // int8×int8 matmuls (Q@K^T and attn@V), then dequantizes the output back to float32.
 func execQuantizedSDPAHighway(backend *simplego.Backend, node *simplego.Node, inputs []*simplego.Buffer, inputsOwned []bool) (*simplego.Buffer, error) {
-	numHeads, numKVHeads, axesLayout, scale, causal := simplego.QuantizedSDPAParams(node)
+	numHeads, numKVHeads, axesLayout, scale, causal := simplego.SDPAParams(node)
 
 	q := inputs[0]
 	k := inputs[1]
