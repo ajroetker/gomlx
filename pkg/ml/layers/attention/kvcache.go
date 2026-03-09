@@ -32,6 +32,32 @@ import (
 // KVCacheScopeName is the scope name used for KV cache variables in the context.
 const KVCacheScopeName = "kv_cache"
 
+// KVCacheAccessor abstracts KV cache storage for model functions.
+// It is constructed by the serving engine and passed to the model function
+// each step, allowing the engine to own the KV cache layout (flat or paged)
+// without the model needing to know the details.
+//
+// The context passed to WriteRead should be scoped to the current layer
+// (e.g., ctx.In("layer_0").In("attention")). The accessor uses
+// ctx.In("kv_cache") internally for variable storage.
+type KVCacheAccessor interface {
+	// WriteRead stores new key/value projections and returns the full cached
+	// keys and values for attention computation.
+	//
+	// newKey, newValue shape: [batchSize, numKVHeads, newSeqLen, headDim]
+	// Returns: [batchSize, numKVHeads, cacheSeqLen, headDim]
+	WriteRead(ctx *context.Context, g *Graph, newKey, newValue *Node) (cachedKeys, cachedValues *Node)
+
+	// Mask returns a boolean attention mask for unfilled cache positions.
+	// True = attend, False = mask out.
+	// Shape: [batchSize, 1, querySeqLen, keySeqLen]
+	Mask(g *Graph, querySeqLen int) *Node
+
+	// KeySeqLen returns the key sequence length used for attention computation.
+	// For flat caches, this is maxSeqLen. For paged caches, this is numBlocks * blockSize.
+	KeySeqLen() int
+}
+
 // KV cache variable names
 const (
 	kvCacheKeyName   = "key"
@@ -58,11 +84,15 @@ const (
 func KVCacheReset(ctx *context.Context) {
 	keySuffix := fmt.Sprintf("%s%s%s%s", context.ScopeSeparator, KVCacheScopeName, context.ScopeSeparator, kvCacheKeyName)
 	valueSuffix := fmt.Sprintf("%s%s%s%s", context.ScopeSeparator, KVCacheScopeName, context.ScopeSeparator, kvCacheValueName)
+	biasSuffix := fmt.Sprintf("%s%s%s%s", context.ScopeSeparator, KVCacheScopeName, context.ScopeSeparator, kvCacheBiasName)
+	refSuffix := fmt.Sprintf("%s%s%s%s", context.ScopeSeparator, KVCacheScopeName, context.ScopeSeparator, kvCacheRefQueriesName)
 
 	for v := range ctx.IterVariablesInScope() {
 		scopeAndName := v.ScopeAndName()
 		if strings.HasSuffix(scopeAndName, keySuffix) ||
-			strings.HasSuffix(scopeAndName, valueSuffix) {
+			strings.HasSuffix(scopeAndName, valueSuffix) ||
+			strings.HasSuffix(scopeAndName, biasSuffix) ||
+			strings.HasSuffix(scopeAndName, refSuffix) {
 			// Reset to zero - tensors.FromShape creates a zero-initialized tensor
 			v.SetValue(tensors.FromShape(v.Shape()))
 		}
@@ -186,9 +216,9 @@ func KVCacheUpdate(ctx *context.Context, g *Graph, cacheShape shapes.Shape, star
 	valueVar.SetValueGraph(valueCache)
 }
 
-// getKVCache returns key/value caches from the given context.
+// GetKVCache returns key/value caches from the given context.
 // cacheShape must be [batchSize, numHeads, maxSeqLen, headDim].
-func getKVCache(ctx *context.Context, g *Graph, cacheShape shapes.Shape) (keys, values *Node) {
+func GetKVCache(ctx *context.Context, g *Graph, cacheShape shapes.Shape) (keys, values *Node) {
 	keyVar, valueVar := KVCacheGetVars(ctx, cacheShape)
 	return keyVar.ValueGraph(g), valueVar.ValueGraph(g)
 }
@@ -282,7 +312,7 @@ func BatchedKVCacheUpdate(ctx *context.Context, g *Graph, cacheShape shapes.Shap
 	valueVar.SetValueGraph(valueCache)
 }
 
-// createBatchedKVCacheAttentionMask creates a validity mask where each batch element
+// CreateBatchedKVCacheAttentionMask creates a validity mask where each batch element
 // has an independent effective position. Used with BatchedKVCacheUpdate for
 // continuous batching.
 //
@@ -295,7 +325,7 @@ func BatchedKVCacheUpdate(ctx *context.Context, g *Graph, cacheShape shapes.Shap
 //
 // Returns:
 //   - Boolean mask shaped [batchSize, 1, querySeqLen, keySeqLen]
-func createBatchedKVCacheAttentionMask(g *Graph, cacheShape shapes.Shape, positions *Node, querySeqLen, keySeqLen int) *Node {
+func CreateBatchedKVCacheAttentionMask(g *Graph, cacheShape shapes.Shape, positions *Node, querySeqLen, keySeqLen int) *Node {
 	maxSeqLen := cacheShape.Dimensions[2]
 
 	// Use Int32 for position arithmetic regardless of cache DType.

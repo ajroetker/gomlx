@@ -12,6 +12,8 @@
 //	go run gemma3.go --prompt="What is Go?"
 //	go run gemma3.go --max-tokens=50
 //	go run gemma3.go --prompts-file=prompts.txt --warmup=2
+//	go run gemma3.go --compaction --compaction-ratio=2
+//	go run gemma3.go --compaction --compaction-ratio=4 --max-seq-len=1024
 package main
 
 import (
@@ -20,6 +22,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"runtime/pprof"
 	"strings"
 	"time"
 
@@ -34,11 +37,13 @@ import (
 	"github.com/gomlx/gomlx/pkg/ml/context"
 	"github.com/gomlx/gomlx/pkg/ml/decode"
 	"github.com/gomlx/gomlx/pkg/ml/layers/attention"
-	"github.com/gomlx/gomlx/pkg/ml/serving"
+	"github.com/ajroetker/huggingface-gomlx/kvcache"
+	"github.com/ajroetker/huggingface-gomlx/serving"
 	"github.com/gomlx/onnx-gomlx/onnx"
 	"k8s.io/klog/v2"
 
 	_ "github.com/gomlx/gomlx/backends/default"
+	_ "github.com/gomlx/gomlx/backends/simplego/highway"
 )
 
 const (
@@ -52,13 +57,29 @@ var (
 	flagWarmup      = flag.Int("warmup", 1, "Number of warmup rounds before measurement (only with --prompts-file).")
 	flagMaxTokens   = flag.Int("max-tokens", 100, "Maximum number of tokens to generate.")
 	flagMaxSeqLen   = flag.Int("max-seq-len", 256, "Maximum total sequence length (prompt + generated tokens).")
-	flagFP16        = flag.Bool("fp16", false, "Use fp16 (float16) model variant (570MB instead of 1.14GB).")
-	flagBackend     = flag.String("backend", "", "Backend to use (default: auto-detect).")
+	flagFP16             = flag.Bool("fp16", false, "Use fp16 (float16) model variant (570MB instead of 1.14GB).")
+	flagBackend          = flag.String("backend", "", "Backend to use (default: auto-detect).")
+	flagCPUProfile       = flag.String("cpuprofile", "", "Write CPU profile to file.")
+	flagCompaction       = flag.Bool("compaction", false, "Enable KV cache compaction after prefill.")
+	flagCompactionRatio  = flag.Int("compaction-ratio", 2, "Compaction ratio: cache is compressed to 1/ratio of prompt length.")
+	flagNumRefQueries    = flag.Int("num-ref-queries", 64, "Number of reference queries for compaction scoring.")
 )
 
 func main() {
 	klog.InitFlags(nil)
 	flag.Parse()
+
+	if *flagCPUProfile != "" {
+		f, err := os.Create(*flagCPUProfile)
+		if err != nil {
+			klog.Fatalf("Failed to create CPU profile: %v", err)
+		}
+		defer f.Close()
+		if err := pprof.StartCPUProfile(f); err != nil {
+			klog.Fatalf("Failed to start CPU profile: %v", err)
+		}
+		defer pprof.StopCPUProfile()
+	}
 
 	if *flagBackend != "" {
 		if err := os.Setenv("GOMLX_BACKEND", *flagBackend); err != nil {
@@ -167,10 +188,23 @@ func main() {
 
 	// Create the serving engine.
 	tokWrapper := &servingTokenizer{tok: tok, eosID: eosID, endOfTurnID: endOfTurnID}
-	eng := serving.NewEngine(backend, ctx, modelFn, tokWrapper, serving.Config{
+	config := serving.Config{
 		MaxSeqLen:    maxSeqLen,
 		MaxBatchSize: 1, // ONNX model with explicit KV I/O supports batch=1
-	}, kv.kvHeads, kv.headDim, kv.kvDType)
+	}
+	if *flagCompaction {
+		// Compaction target length is determined per-request based on actual prompt
+		// length divided by the ratio. We set a default here; the engine compacts
+		// when position > TargetLen after prefill.
+		targetLen := maxSeqLen / *flagCompactionRatio
+		fmt.Printf("KV cache compaction enabled: ratio=%d, target=%d tokens, ref_queries=%d\n",
+			*flagCompactionRatio, targetLen, *flagNumRefQueries)
+		config.Compaction = &kvcache.CompactionConfig{
+			TargetLen:     targetLen,
+			NumRefQueries: *flagNumRefQueries,
+		}
+	}
+	eng := serving.NewEngine(backend, ctx, modelFn, tokWrapper, config, kv.kvHeads, kv.headDim, kv.kvDType)
 	defer eng.Stop()
 
 	// Generation loop.
@@ -310,7 +344,7 @@ func makeModelFn(
 	// Fixed cache shape for context variables: [1, kvHeads, maxSeqLen, headDim].
 	cacheShape := shapes.Make(kv.kvDType, 1, kv.kvHeads, maxSeqLen, kv.headDim)
 
-	return func(ctx *context.Context, newTokens *Node, positions *Node, _ attention.KVCacheAccessor, _ *decode.AuxInputs) *Node {
+	return func(ctx *context.Context, newTokens *Node, positions *Node, _ attention.KVCacheAccessor, aux *decode.AuxInputs) *Node {
 		g := newTokens.Graph()
 		seqLen := newTokens.Shape().Dimensions[1]
 
@@ -332,8 +366,16 @@ func makeModelFn(
 			valCaches[i] = valVars[i].ValueGraph(g)
 		}
 
-		// Position as int64 for building position_ids and attention_mask.
-		posI64 := ConvertDType(positions, dtypes.Int64) // [batchSize=1]
+		// positions carries the absolute sequence position (for RoPE/position_ids).
+		// cacheWritePos carries the cache write position (for mask and KV writes).
+		// After compaction, these differ; otherwise they are the same.
+		cacheWritePos := positions
+		if aux != nil && aux.CacheWritePositions != nil {
+			cacheWritePos = aux.CacheWritePositions
+		}
+
+		posI64 := ConvertDType(positions, dtypes.Int64)               // [batchSize=1] — for RoPE
+		cacheWritePosI64 := ConvertDType(cacheWritePos, dtypes.Int64) // [batchSize=1] — for mask/writes
 
 		if seqLen > 1 {
 			// --- Prefill path ---
@@ -360,13 +402,15 @@ func makeModelFn(
 			}
 
 			if hasAttentionMask {
-				// Mask: [1, maxSeqLen + 1] — past positions [0, pos) + current token.
+				// Mask: [1, maxSeqLen + 1] — past positions [0, cacheWritePos) + current token.
 				// The ONNX model sees past_seq_len=maxSeqLen (padded), so total
 				// attention length is maxSeqLen + 1 (past + current).
+				// After compaction, cacheWritePos < absPosition, so positions beyond
+				// cacheWritePos (which were zeroed by compaction) are correctly masked out.
 				totalLen := maxSeqLen + 1
 				idx := Iota(g, shapes.Make(dtypes.Int64, 1, totalLen), 1)
-				posExpanded := Reshape(posI64, 1, 1)
-				pastValid := LessThan(idx, posExpanded)
+				cwpExpanded := Reshape(cacheWritePosI64, 1, 1)
+				pastValid := LessThan(idx, cwpExpanded)
 				currentValid := Equal(idx, ConstAs(idx, int64(maxSeqLen)))
 				validMask := Or(pastValid, currentValid)
 				inputs["attention_mask"] = Where(validMask, OnesLike(idx), ZerosLike(idx))
@@ -396,9 +440,10 @@ func makeModelFn(
 				newKey := Slice(presentKey, AxisRange(), AxisRange(), AxisRange(maxSeqLen, maxSeqLen+1), AxisRange())
 				newVal := Slice(presentVal, AxisRange(), AxisRange(), AxisRange(maxSeqLen, maxSeqLen+1), AxisRange())
 
-				posI32 := Reshape(Slice(ConvertDType(positions, dtypes.Int32), AxisElem(0)))
-				keyCaches[i] = DynamicUpdateSlice(keyCaches[i], newKey, []*Node{zero, zero, posI32, zero})
-				valCaches[i] = DynamicUpdateSlice(valCaches[i], newVal, []*Node{zero, zero, posI32, zero})
+				// Use cacheWritePos for the KV cache write position.
+				cwpI32 := Reshape(Slice(ConvertDType(cacheWritePos, dtypes.Int32), AxisElem(0)))
+				keyCaches[i] = DynamicUpdateSlice(keyCaches[i], newKey, []*Node{zero, zero, cwpI32, zero})
+				valCaches[i] = DynamicUpdateSlice(valCaches[i], newVal, []*Node{zero, zero, cwpI32, zero})
 			}
 
 			keyVars[i].SetValueGraph(keyCaches[i])
@@ -468,9 +513,9 @@ type kvStructure struct {
 	outputKeyIndices []int
 	// outputValueIndices are indices into the model's output list for the present value tensors.
 	outputValueIndices []int
-	logitsIndex        int          // index of logits in model.Outputs()
-	kvHeads            int          // number of KV attention heads
-	headDim            int          // head dimension
+	logitsIndex        int        // index of logits in model.Outputs()
+	kvHeads            int        // number of KV attention heads
+	headDim            int        // head dimension
 	kvDType            dtypes.DType // dtype for KV cache (e.g. Float32 or Float16)
 }
 

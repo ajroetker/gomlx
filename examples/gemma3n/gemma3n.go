@@ -40,7 +40,8 @@ import (
 	"github.com/gomlx/gomlx/pkg/ml/context"
 	"github.com/gomlx/gomlx/pkg/ml/decode"
 	"github.com/gomlx/gomlx/pkg/ml/layers/attention"
-	"github.com/gomlx/gomlx/pkg/ml/serving"
+	"github.com/ajroetker/huggingface-gomlx/kvcache"
+	"github.com/ajroetker/huggingface-gomlx/serving"
 	"github.com/gomlx/onnx-gomlx/onnx"
 	"golang.org/x/image/draw"
 	"k8s.io/klog/v2"
@@ -60,9 +61,11 @@ var (
 	flagPrompt    = flag.String("prompt", "What do you see in this image?", "User message for the chat prompt.")
 	flagImage     = flag.String("image", "", "Path to an image file. If empty, runs in text-only mode.")
 	flagImageSize = flag.Int("image-size", 768, "Target image size for vision encoder (256, 512, or 768).")
-	flagMaxTokens = flag.Int("max-tokens", 200, "Maximum number of tokens to generate.")
-	flagMaxSeqLen = flag.Int("max-seq-len", 512, "Maximum total sequence length (prompt + generated tokens).")
-	flagBackend   = flag.String("backend", "", "Backend to use (default: auto-detect).")
+	flagMaxTokens       = flag.Int("max-tokens", 200, "Maximum number of tokens to generate.")
+	flagMaxSeqLen       = flag.Int("max-seq-len", 512, "Maximum total sequence length (prompt + generated tokens).")
+	flagBackend         = flag.String("backend", "", "Backend to use (default: auto-detect).")
+	flagCompaction      = flag.Bool("compaction", false, "Enable KV cache compaction after prefill.")
+	flagCompactionRatio = flag.Int("compaction-ratio", 2, "Compaction ratio (e.g., 2 = halve cache, 4 = quarter).")
 )
 
 func main() {
@@ -232,10 +235,27 @@ func main() {
 
 	// Create the serving engine.
 	tokWrapper := &servingTokenizer{tok: tok, eosID: eosID, endOfTurnID: endOfTurnID}
-	eng := serving.NewEngine(backend, ctx, modelFn, tokWrapper, serving.Config{
+	engineCfg := serving.Config{
 		MaxSeqLen:    maxSeqLen,
 		MaxBatchSize: 1,
-	}, kv.kvHeads, kv.headDim, kv.kvDType)
+	}
+	if *flagCompaction {
+		ratio := *flagCompactionRatio
+		if ratio < 2 {
+			ratio = 2
+		}
+		targetLen := len(promptTokens) / ratio
+		if targetLen < 16 {
+			targetLen = 16
+		}
+		engineCfg.Compaction = &kvcache.CompactionConfig{
+			TargetLen:     targetLen,
+			NumRefQueries: 64,
+			MinSeqLen:     32,
+		}
+		fmt.Printf("Compaction enabled: %dx (target %d tokens from %d)\n", ratio, targetLen, len(promptTokens))
+	}
+	eng := serving.NewEngine(backend, ctx, modelFn, tokWrapper, engineCfg, kv.kvHeads, kv.headDim, kv.kvDType)
 	defer eng.Stop()
 
 	// Set EmbedFn: implements embedding natively in GoMLX using Gather on
