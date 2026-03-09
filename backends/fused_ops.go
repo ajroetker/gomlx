@@ -91,18 +91,20 @@ var NF4LookupTable = [16]float32{
 }
 
 // GGMLQuantType identifies the specific GGML block quantization format.
-// Enum values are aligned with go-highway's gguf.QuantType for future integration.
+// The zero value (GGMLQuantTypeInvalid) is reserved as a sentinel so that
+// default-initialized Quantization structs do not silently appear as Q4_0.
 type GGMLQuantType int
 
 const (
-	GGMLQ4_0  GGMLQuantType = iota // 18 bytes/block, 32 values
-	GGMLQ8_0                       // 34 bytes/block, 32 values
-	GGMLIQ4NL                      // 18 bytes/block, 32 values (non-linear lookup)
-	GGMLQ2_K                       // 84 bytes/block, 256 values
-	GGMLQ3_K                       // 110 bytes/block, 256 values
-	GGMLQ4_K                       // 144 bytes/block, 256 values
-	GGMLQ5_K                       // 176 bytes/block, 256 values
-	GGMLQ6_K                       // 210 bytes/block, 256 values
+	GGMLQuantTypeInvalid GGMLQuantType = iota // zero value sentinel; not a valid format
+	GGMLQ4_0                                  // 18 bytes/block, 32 values
+	GGMLQ8_0                                  // 34 bytes/block, 32 values
+	GGMLIQ4NL                                 // 18 bytes/block, 32 values (non-linear lookup)
+	GGMLQ2_K                                  // 84 bytes/block, 256 values
+	GGMLQ3_K                                  // 110 bytes/block, 256 values
+	GGMLQ4_K                                  // 144 bytes/block, 256 values
+	GGMLQ5_K                                  // 176 bytes/block, 256 values
+	GGMLQ6_K                                  // 210 bytes/block, 256 values
 )
 
 // ValuesPerBlock returns the number of float32 values represented by one block.
