@@ -539,7 +539,7 @@ func BroadcastToShape(x *Node, shape shapes.Shape) *Node {
 // See also the equivalent BroadcastToShape.
 func BroadcastToDims(x *Node, dimensions ...int) *Node {
 	_ = validateBuildingGraphFromInputs(x)
-	shape := shapes.Make(x.DType(), dimensions...)
+	shape := shapes.Shape{DType: x.DType(), Dimensions: slices.Clone(dimensions)}
 	if x.Shape().IsScalar() && shape.IsScalar() {
 		// Assume nothing to do.
 		return x
@@ -606,10 +606,11 @@ func Where(condition, onTrue, onFalse *Node) *Node {
 			)
 		}
 		for axis, dim := range condition.Shape().Dimensions {
-			if dim != 1 && dim != outputShape.Dimensions[axis] {
+			outDim := outputShape.Dimensions[axis]
+			if dim != 1 && dim != shapes.DynamicDim && outDim != shapes.DynamicDim && dim != outDim {
 				exceptions.Panicf(
 					"Where() condition shape %s is not broadcastable to output shape %s (axis %d: %d vs %d)",
-					condition.Shape(), outputShape, axis, dim, outputShape.Dimensions[axis],
+					condition.Shape(), outputShape, axis, dim, outDim,
 				)
 			}
 		}
@@ -619,7 +620,7 @@ func Where(condition, onTrue, onFalse *Node) *Node {
 			condition = InsertAxes(condition, xslices.SliceWithValue(extraAxes, -1)...)
 		}
 		if !condition.Shape().Equal(outputShape) {
-			condition = BroadcastToDims(condition, outputShape.Dimensions...)
+			condition = BroadcastToShape(condition, outputShape)
 		}
 	}
 

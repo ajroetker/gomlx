@@ -65,7 +65,8 @@ func SDPAParams(node *Node) (numHeads, numKVHeads int, axesLayout backends.AxesL
 
 // SDPAQuantizedMatmuls returns whether quantized matmuls are requested for an SDPA node.
 func SDPAQuantizedMatmuls(node *Node) bool {
-	return node.data.(*nodeFusedScaledDotProductAttention).quantizedMatmuls
+	opts := node.data.(*nodeFusedScaledDotProductAttention).options
+	return opts != nil && opts.QuantizedMatmuls
 }
 
 // QKVProjectionParams extracts the parameters from a FusedAttentionQKVProjection node.

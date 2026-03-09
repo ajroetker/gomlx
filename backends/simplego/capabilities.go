@@ -155,8 +155,6 @@ var Capabilities = backends.Capabilities{
 		// backends.OpTypeShiftRightArithmetic: true,
 		// backends.OpTypeShiftRightLogical: true,
 		backends.OpTypeBitcast: true,
-		// backends.OpTypeDynamicSlice: true,
-		// backends.OpTypeDynamicUpdateSlice: true,
 
 		// Lower priority ops:
 		// backends.OpTypeBatchNormForInference: true,

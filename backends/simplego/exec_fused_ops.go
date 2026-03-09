@@ -110,24 +110,21 @@ func execFusedGelu(backend *Backend, node *Node, inputs []*Buffer, _ []bool) (*B
 		return nil, err
 	}
 
-	if data.exact {
-		switch input.shape.DType {
-		case dtypes.Float32:
-			gelu(backend, input.flat.([]float32), output.flat.([]float32))
-		case dtypes.Float64:
-			gelu(backend, input.flat.([]float64), output.flat.([]float64))
-		default:
-			return nil, errors.Wrapf(backends.ErrNotImplemented, "FusedGelu: dtype %s", input.shape.DType)
+	switch input.shape.DType {
+	case dtypes.Float32:
+		if data.exact {
+			parallelizeChunked(backend, input.flat.([]float32), output.flat.([]float32), geluChunk[float32])
+		} else {
+			parallelizeChunked(backend, input.flat.([]float32), output.flat.([]float32), geluApproxChunk[float32])
 		}
-	} else {
-		switch input.shape.DType {
-		case dtypes.Float32:
-			geluApprox(backend, input.flat.([]float32), output.flat.([]float32))
-		case dtypes.Float64:
-			geluApprox(backend, input.flat.([]float64), output.flat.([]float64))
-		default:
-			return nil, errors.Wrapf(backends.ErrNotImplemented, "FusedGelu: dtype %s", input.shape.DType)
+	case dtypes.Float64:
+		if data.exact {
+			parallelizeChunked(backend, input.flat.([]float64), output.flat.([]float64), geluChunk[float64])
+		} else {
+			parallelizeChunked(backend, input.flat.([]float64), output.flat.([]float64), geluApproxChunk[float64])
 		}
+	default:
+		return nil, errors.Wrapf(backends.ErrNotImplemented, "FusedGelu: dtype %s", input.shape.DType)
 	}
 	return output, nil
 }
@@ -135,7 +132,10 @@ func execFusedGelu(backend *Backend, node *Node, inputs []*Buffer, _ []bool) (*B
 // minParallelizeChunk is the minimum number of elements to parallelize over.
 const minParallelizeChunk = 4096
 
-func gelu[T float32 | float64](backend *Backend, input, output []T) {
+// parallelizeChunked runs chunkFn over [0, n) in minParallelizeChunk-sized chunks
+// using the backend worker pool. Falls back to sequential if workers are unavailable
+// or n is small.
+func parallelizeChunked[T float32 | float64](backend *Backend, input, output []T, chunkFn func(input, output []T)) {
 	n := len(input)
 	if backend != nil && backend.workers.IsEnabled() && n > minParallelizeChunk {
 		var wg sync.WaitGroup
@@ -143,13 +143,13 @@ func gelu[T float32 | float64](backend *Backend, input, output []T) {
 			iiEnd := min(ii+minParallelizeChunk, n)
 			wg.Add(1)
 			backend.workers.WaitToStart(func() {
-				geluChunk(input[ii:iiEnd], output[ii:iiEnd])
+				chunkFn(input[ii:iiEnd], output[ii:iiEnd])
 				wg.Done()
 			})
 		}
 		wg.Wait()
 	} else {
-		geluChunk(input, output)
+		chunkFn(input, output)
 	}
 }
 
@@ -157,24 +157,6 @@ func geluChunk[T float32 | float64](input, output []T) {
 	sqrt2Inv := T(1.0 / math.Sqrt(2.0))
 	for i, x := range input {
 		output[i] = x * 0.5 * (1.0 + T(math.Erf(float64(x*sqrt2Inv))))
-	}
-}
-
-func geluApprox[T float32 | float64](backend *Backend, input, output []T) {
-	n := len(input)
-	if backend != nil && backend.workers.IsEnabled() && n > minParallelizeChunk {
-		var wg sync.WaitGroup
-		for ii := 0; ii < n; ii += minParallelizeChunk {
-			iiEnd := min(ii+minParallelizeChunk, n)
-			wg.Add(1)
-			backend.workers.WaitToStart(func() {
-				geluApproxChunk(input[ii:iiEnd], output[ii:iiEnd])
-				wg.Done()
-			})
-		}
-		wg.Wait()
-	} else {
-		geluApproxChunk(input, output)
 	}
 }
 
@@ -442,7 +424,7 @@ func fusedDenseApplyActivation[T float32 | float64](backend *Backend, data []T, 
 	case backends.ActivationNone:
 		// No-op.
 	case backends.ActivationGelu:
-		gelu(backend, data, data) // in-place
+		parallelizeChunked(backend, data, data, geluChunk[T]) // in-place
 	case backends.ActivationRelu:
 		for i, x := range data {
 			if x < 0 {
@@ -475,9 +457,9 @@ func fusedDenseApplyActivation[T float32 | float64](backend *Backend, data []T, 
 // mask: optional mask of rank 2–4 (broadcasting via strides). Can be boolean (true = attend,
 // false = ignore) or additive (any float dtype, added to scores before softmax).
 //
-// Quantized matmuls are not yet implemented (awaiting go-highway release). When
-// quantizedMatmuls is true, this scalar fallback falls back to the non-quantized
-// FusedScaledDotProductAttention using standard float32 arithmetic.
+// Currently, quantized matmuls are not implemented (awaiting go-highway release),
+// falling back to the non-quantized FusedScaledDotProductAttention using standard
+// float32 arithmetic when QuantizedMatmuls is set in the options config.
 func execFusedScaledDotProductAttention(backend *Backend, node *Node, inputs []*Buffer, _ []bool) (
 	*Buffer, error) {
 	data := node.data.(*nodeFusedScaledDotProductAttention)
@@ -609,11 +591,12 @@ func sdpaGeneric[T float32 | float64](
 				kvLenUnmasked = min(kvLen, qIdx+1)
 			}
 
-			// Zero out scores for this row to prevent stale data from previous
-			// (batchIdx, kvHeadIdx) iterations when boolean mask or causal mask
-			// skips positions.
-			for i := scoreIdxBase; i < scoreIdxBase+kvLen; i++ {
-				scores[i] = 0
+			// Zero out scores to prevent stale data from previous iterations
+			// when boolean mask or causal mask skips positions.
+			if causal || len(booleanMask) > 0 {
+				for i := scoreIdxBase; i < scoreIdxBase+kvLen; i++ {
+					scores[i] = 0
+				}
 			}
 
 			for kvIdx := range kvLenUnmasked {
@@ -789,9 +772,6 @@ func sdpaMultiHeadGeneric[T float32 | float64](query, key, value, mask, output *
 
 // FusedQuantizedDense =============================================================================================
 
-// nf4LookupTable is a local alias for backends.NF4LookupTable.
-var nf4LookupTable = backends.NF4LookupTable
-
 // execFusedQuantizedDense implements scalar dequant + matmul + bias + activation.
 // inputs layout: [x, weights, scales, zeroPoints?, bias?]
 //
@@ -852,7 +832,7 @@ func execFusedQuantizedDense(backend *Backend, node *Node, inputs []*Buffer, inp
 
 	// For packed sub-byte weights (from Bitcast), unpack nibbles before processing.
 	// Packed buffers have len(flat) < shape.Size() (2 nibbles per byte).
-	wFlat := unpackWeightsIfPacked(wBuf)
+	wFlat := unpackWeightsToInt8(wBuf)
 
 	switch data.scheme {
 	case backends.QuantNF4:
@@ -880,6 +860,24 @@ func execFusedQuantizedDense(backend *Backend, node *Node, inputs []*Buffer, inp
 
 	fusedDenseApplyActivation[float32](backend, out, data.activation)
 	return output, nil
+}
+
+// unpackWeightsToInt8 unpacks sub-byte weight data (Int4, Uint4) from packed
+// []uint8 storage into []int8 (one value per element) for the matmul kernel.
+// For non-sub-byte types, returns the flat data as-is.
+func unpackWeightsToInt8(wBuf *Buffer) any {
+	var unpackFn unpackNibblesFn
+	switch wBuf.shape.DType {
+	case dtypes.Uint4:
+		unpackFn = unpackUint4Nibbles
+	case dtypes.Int4:
+		unpackFn = unpackInt4Nibbles
+	default:
+		return wBuf.flat
+	}
+	unpacked := make([]int8, wBuf.shape.Size())
+	unpackFn(wBuf.flat.([]uint8), unpacked)
+	return unpacked
 }
 
 // execFusedQuantizedDenseGGML handles GGML-quantized weights.
@@ -925,9 +923,6 @@ func execFusedQuantizedDenseGGML(backend *Backend, node *Node, inputs []*Buffer,
 }
 
 // quantizedDenseGGML performs GGML dequant + matmul + bias.
-// Weights are [N, bytesPerRow] Uint8 with native GGML block layout.
-// For each output feature n, the weight row is dequantized to K float32 values,
-// then dot-producted with each input row.
 func quantizedDenseGGML(backend *Backend, x []float32, weights []uint8, bias, out []float32,
 	M, K, N, bytesPerRow int, ggmlType backends.GGMLQuantType) error {
 
@@ -936,7 +931,6 @@ func quantizedDenseGGML(backend *Backend, x []float32, weights []uint8, bias, ou
 		return err
 	}
 
-	// Parallelize over N output features. Each goroutine gets its own dequant buffer.
 	totalWork := M * K * N
 	if backend == nil || !backend.workers.IsEnabled() || totalWork <= minParallelizeChunk {
 		dequantRow := make([]float32, K)
@@ -949,24 +943,20 @@ func quantizedDenseGGML(backend *Backend, x []float32, weights []uint8, bias, ou
 				for k := range K {
 					dot += xRow[k] * dequantRow[k]
 				}
+				outIdx := m*N + n
+				out[outIdx] = dot
 				if bias != nil {
-					dot += bias[n]
+					out[outIdx] += bias[n]
 				}
-				out[m*N+n] = dot
 			}
 		}
-		return nil
-	}
-
-	// Parallel path: tile over N output features.
-	tileSize := max(minParallelizeChunk/K, 1)
-	var wg sync.WaitGroup
-	for nStart := 0; nStart < N; nStart += tileSize {
-		nEnd := min(nStart+tileSize, N)
-		wg.Add(1)
-		backend.workers.WaitToStart(func() {
-			dequantRow := make([]float32, K)
-			for n := nStart; n < nEnd; n++ {
+	} else {
+		var wg sync.WaitGroup
+		for n := range N {
+			n := n
+			wg.Add(1)
+			backend.workers.WaitToStart(func() {
+				dequantRow := make([]float32, K)
 				rowData := weights[n*bytesPerRow : (n+1)*bytesPerRow]
 				dequantFn(rowData, dequantRow)
 				for m := range M {
@@ -975,16 +965,18 @@ func quantizedDenseGGML(backend *Backend, x []float32, weights []uint8, bias, ou
 					for k := range K {
 						dot += xRow[k] * dequantRow[k]
 					}
+					outIdx := m*N + n
+					out[outIdx] = dot
 					if bias != nil {
-						dot += bias[n]
+						out[outIdx] += bias[n]
 					}
-					out[m*N+n] = dot
 				}
-			}
-			wg.Done()
-		})
+				wg.Done()
+			})
+		}
+		wg.Wait()
 	}
-	wg.Wait()
+
 	return nil
 }
 
@@ -1005,8 +997,6 @@ func ggmlDequantFunc(ggmlType backends.GGMLQuantType) (func(data []uint8, output
 }
 
 // ggmlFp16LE decodes a little-endian fp16 value from two bytes into float32.
-// Handles subnormals (denormalized numbers) correctly, which occur for very
-// small scale values in quantized models.
 func ggmlFp16LE(lo, hi uint8) float32 {
 	raw := uint32(lo) | uint32(hi)<<8
 	sign := raw >> 15
@@ -1014,18 +1004,16 @@ func ggmlFp16LE(lo, hi uint8) float32 {
 	mant := raw & 0x3FF
 	if exp == 0 {
 		if mant == 0 {
-			return math.Float32frombits(sign << 31) // ±0
+			return math.Float32frombits(sign << 31)
 		}
-		// Subnormal fp16: normalize by shifting mantissa until leading 1 is found.
 		exp = 1
 		for mant&0x400 == 0 {
 			mant <<= 1
 			exp--
 		}
-		mant &= 0x3FF // Remove the implicit leading 1.
+		mant &= 0x3FF
 		exp = uint32(int32(exp) + 127 - 15)
 	} else if exp == 31 {
-		// Inf or NaN.
 		return math.Float32frombits((sign << 31) | 0x7F800000 | (mant << 13))
 	} else {
 		exp = exp + 127 - 15
@@ -1035,8 +1023,6 @@ func ggmlFp16LE(lo, hi uint8) float32 {
 
 // dequantQ8_0Row converts Q8_0 quantized blocks to float32.
 // Each block is 34 bytes: 2-byte fp16 scale + 32 int8 quants.
-//
-//	output[i] = d * int8(qs[i])
 func dequantQ8_0Row(data []uint8, output []float32) {
 	const blockSize = 34
 	const qk = 32
@@ -1054,11 +1040,6 @@ func dequantQ8_0Row(data []uint8, output []float32) {
 
 // dequantQ4_0Row converts Q4_0 quantized blocks to float32.
 // Each block is 18 bytes: 2-byte fp16 scale + 16 nibble bytes.
-// GGML uses split nibble layout: low nibbles produce the first 16 values,
-// high nibbles produce the last 16 values.
-//
-//	output[j]    = d * (lo_nibble - 8)
-//	output[j+16] = d * (hi_nibble - 8)
 func dequantQ4_0Row(data []uint8, output []float32) {
 	const blockSize = 18
 	const qk = 32
@@ -1078,7 +1059,7 @@ func dequantQ4_0Row(data []uint8, output []float32) {
 }
 
 // getScaleMinK4 extracts a 6-bit scale and min value from the Q4_K/Q5_K
-// 12-byte packed scales array. j is the sub-block index (0..7).
+// 12-byte packed scales array.
 func getScaleMinK4(j int, scales []byte) (sc, m uint8) {
 	if j < 4 {
 		sc = scales[j] & 63
@@ -1092,9 +1073,6 @@ func getScaleMinK4(j int, scales []byte) (sc, m uint8) {
 
 // dequantQ4_KRow converts Q4_K quantized blocks to float32.
 // Each block is 144 bytes: fp16 d (2) + fp16 dmin (2) + 12 bytes packed scales + 128 bytes nibbles.
-// 8 sub-blocks of 32 values with 6-bit packed scales and mins.
-//
-//	output[i] = d * sc * q4 - dmin * m
 func dequantQ4_KRow(data []uint8, output []float32) {
 	const blockSize = 144
 	const qk = 256
@@ -1132,7 +1110,6 @@ func dequantQ4_KRow(data []uint8, output []float32) {
 
 // dequantQ6_KRow converts Q6_K quantized blocks to float32.
 // Each block is 210 bytes: ql (128) + qh (64) + scales (16) + fp16 d (2).
-// 6-bit values: 4 bits from ql + 2 bits from qh, centered by subtracting 32.
 func dequantQ6_KRow(data []uint8, output []float32) {
 	const blockSize = 210
 	const qk = 256
@@ -1148,7 +1125,7 @@ func dequantQ6_KRow(data []uint8, output []float32) {
 		qlOff := 0
 		qhOff := 0
 		scOff := 0
-		for range 2 { // two 128-value halves
+		for range 2 {
 			for l := range 32 {
 				is := l / 16
 				q1 := int8((ql[qlOff+l]&0xF)|((qh[qhOff+l]&3)<<4)) - 32
@@ -1193,13 +1170,9 @@ func execFusedQuantizedGather(backend *Backend, node *Node, inputs []*Buffer, _ 
 		return nil, err
 	}
 
-	// Total number of indices = product of all dims except last (which is 1).
 	numIndices := indicesBuf.shape.Size() / indicesBuf.shape.Dimensions[indicesBuf.shape.Rank()-1]
-
-	// Dequant buffer for one row.
 	dequantRow := make([]float32, K)
 
-	// Dispatch based on indices dtype.
 	switch idxFlat := indicesBuf.flat.(type) {
 	case []int32:
 		for i := range numIndices {
@@ -1227,43 +1200,6 @@ func execFusedQuantizedGather(backend *Backend, node *Node, inputs []*Buffer, _ 
 	}
 
 	return output, nil
-}
-
-// unpackWeightsIfPacked checks if a weight buffer contains packed sub-byte data
-// (from Bitcast, where flat is []uint8 with 2 nibbles per byte) and unpacks
-// nibbles into a temporary slice. Returns the flat data (original or unpacked).
-//
-// For Int4, packed buffers have flat.([]uint8) while unpacked buffers have
-// flat.([]int8). For Uint4, both forms use []uint8 so packed vs unpacked is
-// distinguished by length.
-func unpackWeightsIfPacked(wBuf *Buffer) any {
-	wDType := wBuf.shape.DType
-	expectedSize := wBuf.shape.Size()
-
-	switch wDType {
-	case dtypes.Uint4:
-		wFlat := wBuf.flat.([]uint8)
-		if len(wFlat) == expectedSize {
-			return wFlat // already unpacked
-		}
-		unpacked := make([]uint8, expectedSize)
-		unpackUint4Nibbles(wFlat, unpacked)
-		return unpacked
-	case dtypes.Int4:
-		switch wFlat := wBuf.flat.(type) {
-		case []int8:
-			// Already unpacked: one signed value per element.
-			return wFlat
-		case []uint8:
-			// Packed: unpack with sign extension.
-			unpacked := make([]int8, expectedSize)
-			unpackInt4Nibbles(wFlat, unpacked)
-			return unpacked
-		}
-		return wBuf.flat
-	default:
-		return wBuf.flat
-	}
 }
 
 // quantizedDenseParallel runs rowFn(m) for each row m in [0, M), parallelizing over M rows
@@ -1328,7 +1264,7 @@ func quantizedDenseNF4[T int8 | uint8](backend *Backend, x []float32, weights []
 					blockIdx++
 					nextBlock += blockSize
 				}
-				outSlice[n-nStart] += xVal * nf4LookupTable[uint8(wRow[n])&0x0F] * sRow[blockIdx]
+				outSlice[n-nStart] += xVal * backends.NF4LookupTable[uint8(wRow[n])&0x0F] * sRow[blockIdx]
 			}
 		}
 	})

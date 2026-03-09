@@ -162,8 +162,38 @@ func fullCapFlat(flat any) any {
 	}
 }
 
+// isPackedSubByteDType returns true for types that are stored packed (multiple
+// values per byte): Int4, Uint4, Int2, Uint2. Bool also has Bits()<8 but uses
+// []bool storage, not packed bytes.
+func isPackedSubByteDType(dtype dtypes.DType) bool {
+	switch dtype { //nolint:exhaustive
+	case dtypes.Int4, dtypes.Uint4, dtypes.Int2, dtypes.Uint2:
+		return true
+	default:
+		return false
+	}
+}
+
+// packedLen returns the number of bytes needed to store `logicalSize` elements
+// of the given dtype. For sub-byte types (Int4, Uint4, Int2, Uint2), multiple
+// values are packed per byte in []uint8 storage. For standard types (including
+// Bool, which uses []bool with one value per element), returns logicalSize unchanged.
+func packedLen(dtype dtypes.DType, logicalSize int) int {
+	switch dtype {
+	case dtypes.Int4, dtypes.Uint4, dtypes.Int2, dtypes.Uint2:
+		valuesPerByte := 8 / dtype.Bits()
+		return (logicalSize + valuesPerByte - 1) / valuesPerByte
+	default:
+		return logicalSize
+	}
+}
+
 // makeSliceForDType creates a slice of the appropriate type for the given dtype and length.
 // Fast paths for common dtypes avoid reflection overhead.
+//
+// For sub-byte types (Int4, Uint4, Int2, Uint2), the returned slice is []uint8
+// with packed storage (multiple values per byte). The `length` parameter is the
+// logical element count; the actual slice length is packedLen(dtype, length).
 func makeSliceForDType(dtype dtypes.DType, length int) any {
 	switch dtype { //nolint:exhaustive
 	case dtypes.Float32:
@@ -192,6 +222,9 @@ func makeSliceForDType(dtype dtypes.DType, length int) any {
 		return make([]complex64, length)
 	case dtypes.Complex128:
 		return make([]complex128, length)
+	case dtypes.Int4, dtypes.Uint4, dtypes.Int2, dtypes.Uint2:
+		// Sub-byte types are always stored packed: multiple values per byte.
+		return make([]uint8, packedLen(dtype, length))
 	default:
 		// Fallback to reflection for less common types (BFloat16, Float16, etc.).
 		return reflect.MakeSlice(reflect.SliceOf(dtype.GoType()), length, length).Interface()
@@ -240,7 +273,7 @@ func (b *Backend) getBuffer(dtype dtypes.DType, length int) (*Buffer, error) {
 	// Also reset the 1D shape to match the actual length (the pool's New function
 	// creates shapes at the bucketed size).
 	if length > 0 {
-		buf.flat = subSliceFlat(buf.flat, length)
+		buf.flat = subSliceFlat(buf.flat, packedLen(dtype, length))
 	}
 	buf.shape = shapes.Make(dtype, length)
 	// buf.randomize() // Useful to find where zero-initialized is needed but missing.
@@ -521,7 +554,15 @@ func (b *Backend) BufferFromFlatData(deviceNum backends.DeviceNum, flat any, sha
 			errors.Errorf("backend (%s) only supports deviceNum 0, cannot create buffer on deviceNum %d (shape=%s)",
 				b.Name(), deviceNum, shape)
 	}
-	if dtypes.FromGoType(reflect.TypeOf(flat).Elem()) != shape.DType {
+	// For packed sub-byte types (Int4, Uint4, Int2, Uint2), flat data is []uint8 (packed bytes).
+	// dtypes.FromGoType(uint8) returns Uint8, not Int4, so we validate the element
+	// type directly rather than round-tripping through FromGoType.
+	if isPackedSubByteDType(shape.DType) {
+		if reflect.TypeOf(flat).Elem() != reflect.TypeFor[uint8]() {
+			return nil, errors.Errorf("sub-byte dtype %s requires []uint8 packed flat data, got %s",
+				shape.DType, reflect.TypeOf(flat).Elem())
+		}
+	} else if dtypes.FromGoType(reflect.TypeOf(flat).Elem()) != shape.DType {
 		return nil, errors.Errorf("flat data type (%s) does not match shape DType (%s)",
 			reflect.TypeOf(flat).Elem(), shape.DType)
 	}
