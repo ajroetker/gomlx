@@ -353,8 +353,9 @@ func BenchmarkQuantizedDense(b *testing.B) {
 			[]shapes.Shape{xShape, nf4Shape, scalesShape, biasShape},
 			[]any{xData, nf4Data, scalesData, biasData},
 			func(f backends.Function, params []backends.Value) (backends.Value, error) {
-				return f.FusedQuantizedDense(params[0], params[1], params[2], nil, params[3],
-					backends.QuantNF4, 1, groupSize, backends.ActivationNone)
+				return f.FusedQuantizedDense(params[0], params[1], params[3],
+					&backends.Quantization{Scheme: backends.QuantNF4, Scale: params[2], BlockAxis: 1, BlockSize: groupSize},
+					backends.ActivationNone)
 			})
 		b.Run(fmt.Sprintf("NF4/Fused/%s", sz.name), func(b *testing.B) { nf4Fused.run(b) })
 
@@ -366,8 +367,9 @@ func BenchmarkQuantizedDense(b *testing.B) {
 			[]shapes.Shape{xShape, int4WeightsShape, scalesShape, biasShape},
 			[]any{xData, int4WeightsData, scalesData, biasData},
 			func(f backends.Function, params []backends.Value) (backends.Value, error) {
-				return f.FusedQuantizedDense(params[0], params[1], params[2], nil, params[3],
-					backends.QuantLinear, 1, groupSize, backends.ActivationNone)
+				return f.FusedQuantizedDense(params[0], params[1], params[3],
+					&backends.Quantization{Scheme: backends.QuantLinear, Scale: params[2], BlockAxis: 1, BlockSize: groupSize},
+					backends.ActivationNone)
 			})
 		b.Run(fmt.Sprintf("LinearInt8_2/Fused/%s", sz.name), func(b *testing.B) { int4Fused.run(b) })
 
@@ -379,8 +381,9 @@ func BenchmarkQuantizedDense(b *testing.B) {
 			[]shapes.Shape{xShape, int8WeightsShape, scalesShape, biasShape},
 			[]any{xData, int8WeightsData, scalesData, biasData},
 			func(f backends.Function, params []backends.Value) (backends.Value, error) {
-				return f.FusedQuantizedDense(params[0], params[1], params[2], nil, params[3],
-					backends.QuantLinear, 1, groupSize, backends.ActivationNone)
+				return f.FusedQuantizedDense(params[0], params[1], params[3],
+					&backends.Quantization{Scheme: backends.QuantLinear, Scale: params[2], BlockAxis: 1, BlockSize: groupSize},
+					backends.ActivationNone)
 			})
 		b.Run(fmt.Sprintf("Int8/Fused/%s", sz.name), func(b *testing.B) { int8Fused.run(b) })
 

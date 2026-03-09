@@ -316,6 +316,11 @@ func (f Function) FusedQuantizedDense(x backends.Value, weights backends.Value, 
 	return nil, f.baseErrFn(backends.OpTypeFusedQuantizedDense)
 }
 
+// FusedQuantizedGather performs a quantized embedding lookup.
+func (f Function) FusedQuantizedGather(table backends.Value, indices backends.Value, weightsQuantization *backends.Quantization) (backends.Value, error) {
+	return nil, f.baseErrFn(backends.OpTypeFusedQuantizedGather)
+}
+
 // FusedScaledDotProductAttention computes multi-head scaled dot-product attention.
 //
 // output = softmax(query @ key^T * scale + mask) @ value, computed per-head with GQA support.

@@ -388,8 +388,9 @@ func TestHighwayQuantizedDense_Int8(t *testing.T) {
 			[]shapes.Shape{xShape, wShape, sShape, bShape},
 			[]any{x, weights, scales, bias},
 			func(f backends.Function, params []backends.Value) (backends.Value, error) {
-				return f.FusedQuantizedDense(params[0], params[1], params[2], nil, params[3],
-					backends.QuantLinear, 1, groupSize, backends.ActivationNone)
+				return f.FusedQuantizedDense(params[0], params[1], params[3],
+					&backends.Quantization{Scheme: backends.QuantLinear, Scale: params[2], BlockAxis: 1, BlockSize: groupSize},
+					backends.ActivationNone)
 			},
 		).([]float32)
 
@@ -412,8 +413,9 @@ func TestHighwayQuantizedDense_Int8(t *testing.T) {
 			[]shapes.Shape{xShape, wShape, sShape},
 			[]any{x, weights, scales},
 			func(f backends.Function, params []backends.Value) (backends.Value, error) {
-				return f.FusedQuantizedDense(params[0], params[1], params[2], nil, nil,
-					backends.QuantLinear, 1, groupSize, backends.ActivationNone)
+				return f.FusedQuantizedDense(params[0], params[1], nil,
+					&backends.Quantization{Scheme: backends.QuantLinear, Scale: params[2], BlockAxis: 1, BlockSize: groupSize},
+					backends.ActivationNone)
 			},
 		).([]float32)
 
@@ -435,8 +437,9 @@ func TestHighwayQuantizedDense_Int8(t *testing.T) {
 			[]shapes.Shape{xShape, wShape, sShape},
 			[]any{x, negWeights, scales},
 			func(f backends.Function, params []backends.Value) (backends.Value, error) {
-				return f.FusedQuantizedDense(params[0], params[1], params[2], nil, nil,
-					backends.QuantLinear, 1, groupSize, backends.ActivationRelu)
+				return f.FusedQuantizedDense(params[0], params[1], nil,
+					&backends.Quantization{Scheme: backends.QuantLinear, Scale: params[2], BlockAxis: 1, BlockSize: groupSize},
+					backends.ActivationRelu)
 			},
 		).([]float32)
 
@@ -478,8 +481,9 @@ func TestHighwayQuantizedDense_NF4(t *testing.T) {
 		[]shapes.Shape{xShape, wShape, sShape},
 		[]any{x, weights, scales},
 		func(f backends.Function, params []backends.Value) (backends.Value, error) {
-			return f.FusedQuantizedDense(params[0], params[1], params[2], nil, nil,
-				backends.QuantNF4, 1, groupSize, backends.ActivationNone)
+			return f.FusedQuantizedDense(params[0], params[1], nil,
+				&backends.Quantization{Scheme: backends.QuantNF4, Scale: params[2], BlockAxis: 1, BlockSize: groupSize},
+				backends.ActivationNone)
 		},
 	).([]float32)
 
@@ -513,8 +517,9 @@ func TestHighwayQuantizedDense_Int4(t *testing.T) {
 		[]shapes.Shape{xShape, wShape, sShape},
 		[]any{x, weights, scales},
 		func(f backends.Function, params []backends.Value) (backends.Value, error) {
-			return f.FusedQuantizedDense(params[0], params[1], params[2], nil, nil,
-				backends.QuantLinear, 1, groupSize, backends.ActivationNone)
+			return f.FusedQuantizedDense(params[0], params[1], nil,
+				&backends.Quantization{Scheme: backends.QuantLinear, Scale: params[2], BlockAxis: 1, BlockSize: groupSize},
+				backends.ActivationNone)
 		},
 	).([]float32)
 
