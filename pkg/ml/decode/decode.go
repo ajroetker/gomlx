@@ -62,24 +62,6 @@ type IterativeModelFn func(ctx *context.Context, tokens *Node) *Node
 //   - logits: Output logits [batch, newLen, vocabSize]
 type IncrementalModelFn func(ctx *context.Context, newTokens *Node, position int) *Node
 
-// BatchedModelFn processes tokens with per-element positions as tensors.
-// This enables batching requests at different generation positions in one
-// forward pass, which is the key primitive for continuous batching engines.
-//
-// Unlike IncrementalModelFn (where position is a Go int baked into the
-// compiled graph), positions here are a graph Parameter. This means one
-// compiled graph serves all positions for a given (batchSize, seqLen) shape,
-// dramatically reducing compilation overhead.
-//
-// Parameters:
-//   - ctx: Model context (weights + KV cache variables).
-//   - newTokens: [batchSize, newLen] int32 — new tokens to process.
-//   - positions: [batchSize] int32 — per-element absolute position in sequence.
-//
-// Returns:
-//   - logits: [batchSize, newLen, vocabSize]
-type BatchedModelFn func(ctx *context.Context, newTokens *Node, positions *Node) *Node
-
 // AuxInputs carries optional non-text inputs for multimodal models.
 // nil for text-only requests or decode steps. New modalities (audio, video,
 // etc.) can be added as fields without changing the ModelFn signature.
@@ -98,15 +80,24 @@ type AuxInputs struct {
 	// Used by models like Gemma 3n that route different per-layer signals
 	// through the decoder alongside the primary embeddings.
 	PerLayerInputs *Node
+
+	// CacheWritePositions holds the KV cache write positions [batchSize] int32.
+	// After KV cache compaction, this differs from the positions parameter:
+	// positions carries the absolute sequence position (for RoPE/position_ids),
+	// while CacheWritePositions carries the cache slot where new KV entries
+	// should be written and where the attention mask should end.
+	// nil when no compaction has occurred (use positions for both).
+	CacheWritePositions *Node
 }
 
 // ModelFn is the unified model function type for serving.
 // Positions are always tensors (enabling O(1) compilation with dynamic shapes),
 // and the engine owns the KV cache layout via the KVCacheAccessor.
 //
-// This combines the benefits of BatchedModelFn (position-as-tensor for
-// efficient compilation) with engine-controlled KV cache (enabling transparent
-// paged allocation, prefix caching, and other optimizations).
+// Positions as tensors mean one compiled graph serves all positions for a given
+// (batchSize, seqLen) shape, dramatically reducing compilation overhead.
+// Engine-controlled KV cache enables transparent paged allocation, prefix
+// caching, and other optimizations.
 //
 // Parameters:
 //   - ctx: Model context (weights + KV cache variables).

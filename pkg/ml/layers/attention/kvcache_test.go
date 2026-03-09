@@ -28,7 +28,7 @@ func TestKVCacheFunctions(t *testing.T) {
 			g := input.Graph()
 			cacheCtx := testCtx.In("cache").Reuse().Checked(false)
 
-			keys, _ := getKVCache(cacheCtx, g, cacheShape)
+			keys, _ := GetKVCache(cacheCtx, g, cacheShape)
 			return keys
 		})
 
@@ -52,7 +52,7 @@ func TestKVCacheFunctions(t *testing.T) {
 			cacheCtx := testCtx.In("cache").Reuse().Checked(false)
 
 			KVCacheUpdate(cacheCtx, g, cacheShape, position, keys, values)
-			cachedKeys, _ := getKVCache(cacheCtx, g, cacheShape)
+			cachedKeys, _ := GetKVCache(cacheCtx, g, cacheShape)
 			return cachedKeys
 		})
 
@@ -88,7 +88,7 @@ func TestKVCacheFunctions(t *testing.T) {
 			cacheCtx := testCtx.In("cache").Reuse().Checked(false)
 
 			KVCacheUpdate(cacheCtx, g, cacheShape, position, keys, values)
-			cachedKeys, _ := getKVCache(cacheCtx, g, cacheShape)
+			cachedKeys, _ := GetKVCache(cacheCtx, g, cacheShape)
 			return cachedKeys
 		})
 
@@ -104,7 +104,7 @@ func TestKVCacheFunctions(t *testing.T) {
 			g := keys.Graph()
 			cacheCtx := testCtx.In("cache").Reuse().Checked(false)
 			KVCacheUpdate(cacheCtx, g, cacheShape, position, keys, values)
-			cachedKeys, _ := getKVCache(cacheCtx, g, cacheShape)
+			cachedKeys, _ := GetKVCache(cacheCtx, g, cacheShape)
 			return cachedKeys
 		})
 
@@ -133,7 +133,7 @@ func TestKVCacheFunctions(t *testing.T) {
 			cacheCtx := testCtx.In("cache").Reuse().Checked(false)
 
 			KVCacheUpdate(cacheCtx, g, cacheShape, position, keys, values)
-			cachedKeys, _ := getKVCache(cacheCtx, g, cacheShape)
+			cachedKeys, _ := GetKVCache(cacheCtx, g, cacheShape)
 			return cachedKeys
 		})
 
@@ -171,7 +171,7 @@ func TestKVCacheFunctions(t *testing.T) {
 			cacheCtx := testCtx.In("cache").Reuse().Checked(false)
 
 			KVCacheUpdate(cacheCtx, g, cacheShape, position, keys, values)
-			cachedKeys, _ := getKVCache(cacheCtx, g, cacheShape)
+			cachedKeys, _ := GetKVCache(cacheCtx, g, cacheShape)
 			return cachedKeys
 		})
 
@@ -204,7 +204,7 @@ func TestKVCacheFunctions(t *testing.T) {
 			cacheCtx := testCtx.In("cache").Reuse().Checked(false)
 
 			KVCacheUpdate(cacheCtx, g, cacheShape, position, keys, values)
-			cachedKeys, _ := getKVCache(cacheCtx, g, cacheShape)
+			cachedKeys, _ := GetKVCache(cacheCtx, g, cacheShape)
 			return cachedKeys
 		})
 
@@ -230,7 +230,7 @@ func TestKVCacheFunctions(t *testing.T) {
 		getExec := context.MustNewExec(backend, ctx.Reuse(), func(testCtx *context.Context, dummy *Node) *Node {
 			g := dummy.Graph()
 			cacheCtx := testCtx.In("cache").Reuse().Checked(false)
-			cachedKeys, _ := getKVCache(cacheCtx, g, cacheShape)
+			cachedKeys, _ := GetKVCache(cacheCtx, g, cacheShape)
 			return cachedKeys
 		})
 
@@ -289,7 +289,7 @@ func TestKVCachePersistence(t *testing.T) {
 		values := Mul(keys, Const(g, float32(2.0))) // values = 2 * keys
 
 		KVCacheUpdate(cacheCtx, g, cacheShape, position, keys, values)
-		cachedKeys, _ := getKVCache(cacheCtx, g, cacheShape)
+		cachedKeys, _ := GetKVCache(cacheCtx, g, cacheShape)
 		return cachedKeys
 	})
 
@@ -308,7 +308,7 @@ func TestKVCachePersistence(t *testing.T) {
 		values := Mul(keys, Const(g, float32(2.0)))
 
 		KVCacheUpdate(cacheCtx, g, cacheShape, position, keys, values)
-		cachedKeys, _ := getKVCache(cacheCtx, g, cacheShape)
+		cachedKeys, _ := GetKVCache(cacheCtx, g, cacheShape)
 		return cachedKeys
 	})
 
@@ -337,7 +337,7 @@ func TestKVCacheCircular(t *testing.T) {
 			cacheCtx := testCtx.In("cache").Reuse().Checked(false)
 
 			KVCacheUpdate(cacheCtx, g, cacheShape, position, keys, values)
-			cachedKeys, _ := getKVCache(cacheCtx, g, cacheShape)
+			cachedKeys, _ := GetKVCache(cacheCtx, g, cacheShape)
 
 			return cachedKeys
 		})
@@ -376,7 +376,7 @@ func TestKVCacheCircular(t *testing.T) {
 			cacheCtx := testCtx.In("cache").Reuse().Checked(false)
 
 			KVCacheUpdate(cacheCtx, g, cacheShape, position, keys, values)
-			cachedKeys, _ := getKVCache(cacheCtx, g, cacheShape)
+			cachedKeys, _ := GetKVCache(cacheCtx, g, cacheShape)
 
 			return cachedKeys
 		})
@@ -416,7 +416,7 @@ func TestBatchedKVCacheFunctions(t *testing.T) {
 			cacheCtx := testCtx.In("cache").Reuse().Checked(false)
 
 			BatchedKVCacheUpdate(cacheCtx, g, cacheShape, positions, keys, values)
-			cachedKeys, _ := getKVCache(cacheCtx, g, cacheShape)
+			cachedKeys, _ := GetKVCache(cacheCtx, g, cacheShape)
 			return cachedKeys
 		})
 
@@ -461,7 +461,7 @@ func TestBatchedKVCacheFunctions(t *testing.T) {
 			cacheCtx := testCtx.In("cache").Reuse().Checked(false)
 
 			BatchedKVCacheUpdate(cacheCtx, g, cacheShape, positions, keys, values)
-			cachedKeys, _ := getKVCache(cacheCtx, g, cacheShape)
+			cachedKeys, _ := GetKVCache(cacheCtx, g, cacheShape)
 			return cachedKeys
 		})
 
@@ -495,7 +495,7 @@ func TestBatchedKVCacheFunctions(t *testing.T) {
 
 		exec := context.MustNewExec(backend, ctx, func(testCtx *context.Context, positions *Node) *Node {
 			g := positions.Graph()
-			mask := createBatchedKVCacheAttentionMask(g, cacheShape, positions, 1, maxSeqLen)
+			mask := CreateBatchedKVCacheAttentionMask(g, cacheShape, positions, 1, maxSeqLen)
 			// Convert bool to float for easier assertion.
 			return ConvertDType(mask, dtypes.Float32)
 		})
