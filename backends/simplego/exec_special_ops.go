@@ -11,6 +11,7 @@ import (
 	"github.com/gomlx/gomlx/pkg/core/dtypes"
 	"github.com/gomlx/gomlx/pkg/core/dtypes/bfloat16"
 	"github.com/gomlx/gomlx/pkg/core/shapes"
+	"github.com/x448/float16"
 	"github.com/gomlx/gomlx/pkg/support/sets"
 	"github.com/gomlx/gomlx/pkg/support/xslices"
 	"github.com/pkg/errors"
@@ -42,6 +43,8 @@ func init() {
 	setNodeExecutor(backends.OpTypeScatterMin, priorityGeneric, execScatter)
 	setNodeExecutor(backends.OpTypeScatterSum, priorityGeneric, execScatter)
 	setNodeExecutor(backends.OpTypeSlice, priorityGeneric, execSlice)
+	setNodeExecutor(backends.OpTypeDynamicSlice, priorityGeneric, execDynamicSlice)
+	setNodeExecutor(backends.OpTypeDynamicUpdateSlice, priorityGeneric, execDynamicUpdateSlice)
 	setNodeExecutor(backends.OpTypeArgMinMax, priorityGeneric, execArgMinMax)
 	setNodeExecutor(backends.OpTypeReduceWindow, priorityGeneric, execReduceWindow)
 
@@ -1550,6 +1553,166 @@ func execSliceGeneric[T SupportedTypesConstraints](operand, output *Buffer, para
 			operandFlatIdx -= operandPerAxisSize[axis] * operandFlatStrides[axis]
 		}
 	}
+}
+
+// DynamicSlice ========================================================================================================
+
+// readScalarInt reads a scalar integer value from a Buffer.
+// The buffer must hold an integer dtype.
+func readScalarInt(buf *Buffer) int {
+	fn := readScalarIntDTypeMap.Get(buf.shape.DType).(func(flat any) int)
+	return fn(buf.flat)
+}
+
+var readScalarIntDTypeMap = NewDTypeMap("ReadScalarInt")
+
+func readScalarIntGeneric[T PODIntegerConstraints](flatAny any) int {
+	flat := flatAny.([]T)
+	return int(flat[0])
+}
+
+func init() {
+	readScalarIntDTypeMap.Register(dtypes.Int8, priorityGeneric, readScalarIntGeneric[int8])
+	readScalarIntDTypeMap.Register(dtypes.Int16, priorityGeneric, readScalarIntGeneric[int16])
+	readScalarIntDTypeMap.Register(dtypes.Int32, priorityGeneric, readScalarIntGeneric[int32])
+	readScalarIntDTypeMap.Register(dtypes.Int64, priorityGeneric, readScalarIntGeneric[int64])
+	readScalarIntDTypeMap.Register(dtypes.Uint8, priorityGeneric, readScalarIntGeneric[uint8])
+	readScalarIntDTypeMap.Register(dtypes.Uint16, priorityGeneric, readScalarIntGeneric[uint16])
+	readScalarIntDTypeMap.Register(dtypes.Uint32, priorityGeneric, readScalarIntGeneric[uint32])
+	readScalarIntDTypeMap.Register(dtypes.Uint64, priorityGeneric, readScalarIntGeneric[uint64])
+}
+
+// execDynamicSlice is the executor for backends.OpTypeDynamicSlice.
+func execDynamicSlice(backend *Backend, node *Node, inputs []*Buffer, inputsOwned []bool) (*Buffer, error) {
+	operand := inputs[0]
+	sliceParams, ok := node.data.(*dynamicSliceNode)
+	if !ok {
+		return nil, errors.Errorf("internal error: node.data for DynamicSlice op is not *dynamicSliceNode, but %T", node.data)
+	}
+
+	rank := operand.shape.Rank()
+
+	// Read and clamp start indices from scalar input buffers.
+	starts := make([]int, rank)
+	for i := range rank {
+		starts[i] = readScalarInt(inputs[1+i])
+		maxStart := operand.shape.Dimensions[i] - sliceParams.sliceDims[i]
+		starts[i] = max(0, min(starts[i], maxStart))
+	}
+
+	output, err := backend.getBuffer(node.shape.DType, node.shape.Size())
+	if err != nil {
+		return nil, err
+	}
+	output.shape = node.shape
+
+	// Reuse the slice generic path: create a temporary sliceNode with strides=1.
+	tmpParams := &sliceNode{
+		starts:  starts,
+		limits:  make([]int, rank),
+		strides: make([]int, rank),
+	}
+	for i := range rank {
+		tmpParams.limits[i] = starts[i] + sliceParams.sliceDims[i]
+		tmpParams.strides[i] = 1
+	}
+
+	fn := sliceDTypeMap.Get(node.shape.DType).(func(operand, output *Buffer, params *sliceNode))
+	fn(operand, output, tmpParams)
+	return output, nil
+}
+
+// DynamicUpdateSlice ==================================================================================================
+
+// execDynamicUpdateSlice is the executor for backends.OpTypeDynamicUpdateSlice.
+func execDynamicUpdateSlice(backend *Backend, node *Node, inputs []*Buffer, inputsOwned []bool) (*Buffer, error) {
+	operand := inputs[0]
+	update := inputs[1]
+	rank := operand.shape.Rank()
+
+	// Read and clamp start indices from scalar input buffers.
+	starts := make([]int, rank)
+	for i := range rank {
+		starts[i] = readScalarInt(inputs[2+i])
+		maxStart := operand.shape.Dimensions[i] - update.shape.Dimensions[i]
+		starts[i] = max(0, min(starts[i], maxStart))
+	}
+
+	output, err := backend.getBuffer(node.shape.DType, node.shape.Size())
+	if err != nil {
+		return nil, err
+	}
+	output.shape = node.shape
+
+	fn := dynamicUpdateSliceDTypeMap.Get(node.shape.DType).(func(operand, update, output *Buffer, starts []int))
+	fn(operand, update, output, starts)
+	return output, nil
+}
+
+var dynamicUpdateSliceDTypeMap = NewDTypeMap("DynamicUpdateSlice")
+
+// execDynamicUpdateSliceGeneric copies operand to output, then overwrites the region at starts with update.
+func execDynamicUpdateSliceGeneric[T SupportedTypesConstraints](operand, update, output *Buffer, starts []int) {
+	operandFlat := operand.flat.([]T)
+	updateFlat := update.flat.([]T)
+	outputFlat := output.flat.([]T)
+
+	// Copy the full operand to output.
+	copy(outputFlat, operandFlat)
+
+	// Overwrite the update region.
+	rank := operand.shape.Rank()
+	operandStrides := calculateStrides(operand.shape.Dimensions)
+	updateStrides := calculateStrides(update.shape.Dimensions)
+	updateDims := update.shape.Dimensions
+
+	updatePerAxisIdx := make([]int, rank)
+	updateFlatIdx := 0
+
+	// Compute initial operand flat index from starts.
+	operandFlatIdx := 0
+	for axis := range rank {
+		operandFlatIdx += operandStrides[axis] * starts[axis]
+	}
+
+	totalUpdateSize := update.shape.Size()
+	for ii := range totalUpdateSize {
+		_ = ii
+		outputFlat[operandFlatIdx] = updateFlat[updateFlatIdx]
+
+		// Advance to next position in update tensor.
+		for axis := rank - 1; axis >= 0; axis-- {
+			if updateDims[axis] <= 1 {
+				continue
+			}
+			updatePerAxisIdx[axis]++
+			updateFlatIdx += updateStrides[axis]
+			operandFlatIdx += operandStrides[axis]
+			if updatePerAxisIdx[axis] < updateDims[axis] {
+				break
+			}
+			// Rewind this axis.
+			updatePerAxisIdx[axis] = 0
+			updateFlatIdx -= updateDims[axis] * updateStrides[axis]
+			operandFlatIdx -= updateDims[axis] * operandStrides[axis]
+		}
+	}
+}
+
+func init() {
+	dynamicUpdateSliceDTypeMap.Register(dtypes.Int8, priorityGeneric, execDynamicUpdateSliceGeneric[int8])
+	dynamicUpdateSliceDTypeMap.Register(dtypes.Int16, priorityGeneric, execDynamicUpdateSliceGeneric[int16])
+	dynamicUpdateSliceDTypeMap.Register(dtypes.Int32, priorityGeneric, execDynamicUpdateSliceGeneric[int32])
+	dynamicUpdateSliceDTypeMap.Register(dtypes.Int64, priorityGeneric, execDynamicUpdateSliceGeneric[int64])
+	dynamicUpdateSliceDTypeMap.Register(dtypes.Uint8, priorityGeneric, execDynamicUpdateSliceGeneric[uint8])
+	dynamicUpdateSliceDTypeMap.Register(dtypes.Uint16, priorityGeneric, execDynamicUpdateSliceGeneric[uint16])
+	dynamicUpdateSliceDTypeMap.Register(dtypes.Uint32, priorityGeneric, execDynamicUpdateSliceGeneric[uint32])
+	dynamicUpdateSliceDTypeMap.Register(dtypes.Uint64, priorityGeneric, execDynamicUpdateSliceGeneric[uint64])
+	dynamicUpdateSliceDTypeMap.Register(dtypes.Float32, priorityGeneric, execDynamicUpdateSliceGeneric[float32])
+	dynamicUpdateSliceDTypeMap.Register(dtypes.Float64, priorityGeneric, execDynamicUpdateSliceGeneric[float64])
+	dynamicUpdateSliceDTypeMap.Register(dtypes.BFloat16, priorityGeneric, execDynamicUpdateSliceGeneric[bfloat16.BFloat16])
+	dynamicUpdateSliceDTypeMap.Register(dtypes.Float16, priorityGeneric, execDynamicUpdateSliceGeneric[float16.Float16])
+	dynamicUpdateSliceDTypeMap.Register(dtypes.Bool, priorityGeneric, execDynamicUpdateSliceGeneric[bool])
 }
 
 // RNGBitGenerator ====================================================================================================

@@ -11,6 +11,7 @@ import (
 	. "github.com/gomlx/gomlx/pkg/core/graph"
 	"github.com/gomlx/gomlx/pkg/core/shapes"
 	"github.com/gomlx/gomlx/pkg/ml/context"
+	"github.com/gomlx/gomlx/pkg/ml/context/initializers"
 	"github.com/gomlx/gomlx/pkg/ml/layers"
 	"github.com/gomlx/gomlx/pkg/ml/layers/attention/pos"
 	"github.com/gomlx/gomlx/pkg/ml/layers/regularizers"
@@ -54,12 +55,20 @@ type MultiHeadAttentionBuilder struct {
 	position       *Node // Position as a graph node (scalar int32) for graph caching
 	actualCacheLen *Node // Actual filled cache length (scalar int32)
 
+	// kvCacheAccessor is an engine-provided KV cache abstraction.
+	// When set (via WithKVCacheAccessor), it replaces direct KV cache operations.
+	kvCacheAccessor KVCacheAccessor
+
 	// Positional Encoder to be used, e.g: RoPE.
 	positionalEncoder pos.Encoder
 
 	// useQKVProjection replaces separate Dense Q/K/V projections with a single fused
 	// QKVProjection (one large matmul + split). Only valid for self-attention.
 	useQKVProjection bool
+
+	// queryCaptureCount, if > 0, stores the last N projected queries (post-RoPE)
+	// in a context variable for use as reference queries during KV cache compaction.
+	queryCaptureCount int
 }
 
 // MultiHeadAttention defines a multi-head attention layers, as described in the paper
@@ -392,6 +401,24 @@ func (b *MultiHeadAttentionBuilder) WithKVCache(maxSeqLen int, position *Node) *
 	return b
 }
 
+// WithKVCacheAccessor enables incremental generation using an engine-provided
+// KVCacheAccessor. This decouples the model from the KV cache layout, allowing
+// the serving engine to transparently use flat or paged caching.
+//
+// Unlike WithKVCache (which creates and manages cache variables internally),
+// WithKVCacheAccessor delegates all cache operations to the accessor.
+//
+// Parameters:
+//   - accessor: Engine-provided KVCacheAccessor for read/write/mask operations.
+//
+// The accessor's KeySeqLen() determines the effective key length for attention.
+func (b *MultiHeadAttentionBuilder) WithKVCacheAccessor(accessor KVCacheAccessor) *MultiHeadAttentionBuilder {
+	b.kvCacheAccessor = accessor
+	b.useCausalMask = true
+	b.buildAttentionShape()
+	return b
+}
+
 // KVCacheShape returns the shape of the KV cache configured for this attention layer.
 // Shape is [batchSize, numKVHeads, maxSeqLen, headDim] (numKVHeads equals numHeads unless SetNumKVHeads was called).
 // Returns an invalid shape if WithKVCache was not called.
@@ -438,6 +465,25 @@ func (b *MultiHeadAttentionBuilder) UseQKVProjection() *MultiHeadAttentionBuilde
 			"use separate projections instead", b.numKVHeads, b.numHeads)
 	}
 	b.useQKVProjection = true
+	return b
+}
+
+// WithQueryCapture enables capturing the last numRefQueries projected query vectors
+// (after RoPE) during prefill for use as reference queries in KV cache compaction.
+//
+// During prefill (querySeqLen > 1), the last N query vectors are stored in a
+// context variable under "kv_cache/ref_queries". During decode (querySeqLen == 1),
+// this is a no-op. For GQA models, queries are averaged within each KV head group
+// to produce [numKVHeads, numRefQueries, headDim].
+//
+// The stored queries can be retrieved via KVCacheGetRefQueriesVar and passed to
+// attention.Compact as the refQueries parameter for higher-quality compaction
+// than the default key-proxy heuristic.
+func (b *MultiHeadAttentionBuilder) WithQueryCapture(numRefQueries int) *MultiHeadAttentionBuilder {
+	if numRefQueries <= 0 {
+		Panicf("MultiHeadAttention: WithQueryCapture requires numRefQueries > 0, got %d", numRefQueries)
+	}
+	b.queryCaptureCount = numRefQueries
 	return b
 }
 
@@ -518,8 +564,57 @@ func (b *MultiHeadAttentionBuilder) doneInternal(wantCoefficients bool) (attenti
 		projectedKey = b.positionalEncoder.Apply(projectedKey, posIndices, seqAxis)
 	}
 
+	// Capture reference queries for KV cache compaction.
+	// Stored after projection + RoPE but before KV cache write, so the
+	// captured queries match exactly what the model uses for attention.
+	if b.queryCaptureCount > 0 {
+		querySeqLen := projectedQuery.Shape().Dimensions[seqAxis]
+		if querySeqLen > 1 {
+			// Prefill: capture last N queries.
+			numCapture := min(b.queryCaptureCount, querySeqLen)
+			// projectedQuery: [batch, seqLen, numHeads, headDim] (BSHD)
+			captured := Slice(projectedQuery, AxisRange(), AxisRange(querySeqLen-numCapture, querySeqLen), AxisRange(), AxisRange())
+			// Transpose to [batch, numHeads, numCapture, headDim] for cache format.
+			captured = TransposeAllDims(captured, 0, 2, 1, 3)
+
+			// For GQA: average query heads within each KV head group.
+			kvHeadCount := b.effectiveNumKVHeads()
+			if b.numHeads != kvHeadCount {
+				groupSize := b.numHeads / kvHeadCount
+				// [batch, numHeads, N, dim] -> [batch, kvHeads, groupSize, N, dim]
+				dims := captured.Shape().Dimensions
+				captured = Reshape(captured, dims[0], kvHeadCount, groupSize, dims[2], dims[3])
+				// Average over groupSize axis.
+				captured = ReduceMean(captured, 2)
+				// Result: [batch, kvHeads, N, dim]
+			}
+
+			// Store in context variable. We use batch element 0 since during
+			// prefill batchSize=1 (one request at a time).
+			// Shape: [numKVHeads, numCapture, headDim]
+			captured = Squeeze(captured, 0) // Remove batch dim: [kvHeads, N, dim]
+			refQueriesCtx := b.ctx.In("kv_cache").Reuse().Checked(false).WithInitializer(initializers.Zero)
+			refShape := shapes.Make(captured.DType(), kvHeadCount, numCapture, b.keyQueryDim)
+			refVar := refQueriesCtx.VariableWithShape(kvCacheRefQueriesName, refShape)
+			refVar.SetValueGraph(captured)
+		}
+	}
+
 	// Handle KV cache if in incremental generation mode
-	if b.kvCacheShape.Ok() {
+	if b.kvCacheAccessor != nil {
+		// Use engine-provided accessor for KV cache operations.
+		// Cache format: [batch, numHeads, seqLen, headDim]
+		// Projected format: [batch, seqLen, numHeads, headDim]
+		keyForCache := TransposeAllDims(projectedKey, 0, 2, 1, 3)
+		valueForCache := TransposeAllDims(projectedValue, 0, 2, 1, 3)
+
+		cacheCtx := b.ctx.In("kv_cache").Reuse().Checked(false)
+		fullKey, fullValue := b.kvCacheAccessor.WriteRead(cacheCtx, b.g, keyForCache, valueForCache)
+
+		projectedKey = TransposeAllDims(fullKey, 0, 2, 1, 3)
+		projectedValue = TransposeAllDims(fullValue, 0, 2, 1, 3)
+	} else if b.kvCacheShape.Ok() {
+		// Legacy path: direct KV cache operations.
 		// Cache expects shape: [batch, numHeads, seqLen, headDim]
 		// projectedKey/Value shape: [batch, seqLen, numHeads, headDim]
 		// Transpose: (0,1,2,3) -> (0,2,1,3)
@@ -531,10 +626,11 @@ func (b *MultiHeadAttentionBuilder) doneInternal(wantCoefficients bool) (attenti
 		// Pass b.position so the cache knows where to write the new keys/values
 		cacheCtx := b.ctx.In("kv_cache").Reuse().Checked(false)
 		KVCacheUpdate(cacheCtx, b.g, b.kvCacheShape, b.position, keyForCache, valueForCache)
-		fullKey, fullValue := getKVCache(cacheCtx, b.g, b.kvCacheShape)
+		fullKey, fullValue := GetKVCache(cacheCtx, b.g, b.kvCacheShape)
 
-		// b.position holds the current position in the sequence
-		b.actualCacheLen = b.position
+		// actualCacheLen = position + queryLen (number of valid tokens after this write)
+		updateSeqLen := keyForCache.Shape().Dimensions[2]
+		b.actualCacheLen = AddScalar(ConvertDType(b.position, dtypes.Int32), updateSeqLen)
 
 		// Transpose back to attention format: (0,2,1,3) -> (0,1,2,3)
 		// Result: [batch, maxSeqLen, numHeads, headDim]
@@ -553,10 +649,53 @@ func (b *MultiHeadAttentionBuilder) doneInternal(wantCoefficients bool) (attenti
 		mask = Reshape(mask, batchSize, qFlat, b.numHeads, kFlat)
 	}
 
+	// Inject compaction bias from KV cache accessor if available.
+	// The bias is an additive logit bias per key position that preserves
+	// attention mass for dropped keys after KV cache compaction.
+	if bp, ok := b.kvCacheAccessor.(BiasProvider); ok {
+		if biasNode := bp.Bias(b.g); biasNode != nil {
+			// biasNode: [batchSize, numKVHeads, keySeqLen]
+			// Expand for GQA: repeat each KV head's bias for its query head group.
+			kvHeads := b.effectiveNumKVHeads()
+			if b.numHeads != kvHeads {
+				groupSize := b.numHeads / kvHeads
+				// [batch, numKVHeads, keySeqLen] -> [batch, numKVHeads, 1, keySeqLen]
+				biasNode = ExpandDims(biasNode, 2)
+				// Broadcast groupSize -> [batch, numKVHeads, groupSize, keySeqLen]
+				biasDims := biasNode.Shape().Dimensions
+				biasNode = BroadcastToDims(biasNode, biasDims[0], kvHeads, groupSize, biasDims[3])
+				// Reshape to [batch, numHeads, keySeqLen]
+				biasNode = Reshape(biasNode, biasDims[0], b.numHeads, biasDims[3])
+			}
+
+			// Reshape to match mask layout.
+			switch b.layout {
+			case LayoutBSHD:
+				// [batch, numHeads, keySeqLen] -> [batch, 1, numHeads, keySeqLen]
+				biasNode = ExpandDims(biasNode, 1)
+			default: // LayoutBHSD
+				// [batch, numHeads, keySeqLen] -> [batch, numHeads, 1, keySeqLen]
+				biasNode = ExpandDims(biasNode, 2)
+			}
+			biasNode = ConvertDType(biasNode, projectedQuery.DType())
+
+			// Combine with existing mask: convert boolean mask to additive float.
+			if mask != nil && mask.DType() == dtypes.Bool {
+				negInf := ConvertDType(Const(b.g, float32(-1e9)), projectedQuery.DType())
+				zero := ConvertDType(Const(b.g, float32(0)), projectedQuery.DType())
+				mask = Where(mask, Add(zero, biasNode), negInf)
+			} else if mask != nil {
+				mask = Add(mask, biasNode)
+			} else {
+				mask = biasNode
+			}
+		}
+	}
+
 	scale := 1.0 / math.Sqrt(float64(b.keyQueryDim))
 	// Pass causal to Core only when not using KV cache (Core builds a simple lower-triangular mask).
-	// When using KV cache, the position-aware causal mask is already built in buildMask above.
-	passCausal := b.useCausalMask && !b.kvCacheShape.Ok()
+	// When using KV cache or accessor, the position-aware causal mask is already built in buildMask above.
+	passCausal := b.useCausalMask && !b.kvCacheShape.Ok() && b.kvCacheAccessor == nil
 	attentionOutput, attentionCoefficients = Core(b.ctx, projectedQuery, projectedKey, projectedValue, scale, mask, b.dropoutRate, b.layout, passCausal, wantCoefficients)
 
 	// Merge [numHeads, valueDim] into one axis and unflatten query inner dims if needed.
@@ -626,7 +765,9 @@ func (b *MultiHeadAttentionBuilder) qkvProject(x *Node) (projectedQuery, project
 func (b *MultiHeadAttentionBuilder) buildAttentionShape() {
 	// Determine effective key length (may be larger than current key when caching)
 	var keyLen int
-	if b.kvCacheShape.Ok() {
+	if b.kvCacheAccessor != nil {
+		keyLen = b.kvCacheAccessor.KeySeqLen()
+	} else if b.kvCacheShape.Ok() {
 		// In cache mode, key length is the full cache size (kvCacheShape is [batch, heads, maxSeqLen, headDim])
 		keyLen = b.kvCacheShape.Dimensions[2]
 	} else {
@@ -665,7 +806,21 @@ func (b *MultiHeadAttentionBuilder) buildMask() (mask *Node) {
 	}
 
 	// KV cache causal mask: position-aware, built here since Core doesn't know about cache.
-	if b.useCausalMask && b.kvCacheShape.Ok() {
+	if b.useCausalMask && b.kvCacheAccessor != nil {
+		// Use accessor's mask (handles both flat and paged caches).
+		queryLen := b.query.Shape().Dimensions[1]
+		accessorMask := b.kvCacheAccessor.Mask(b.g, queryLen)
+		// accessorMask shape: [batch, 1, queryLen, keyLen]
+		// Convert to attention mask shape: [batch, queryLen, numHeads, keyLen]
+		accessorMask = Squeeze(accessorMask, 1)    // [batch, queryLen, keyLen]
+		accessorMask = ExpandDims(accessorMask, 2) // [batch, queryLen, 1, keyLen]
+		accessorMask = BroadcastToDims(accessorMask, b.attentionShape.Dimensions...)
+		if mask == nil {
+			mask = accessorMask
+		} else {
+			mask = LogicalAnd(mask, accessorMask)
+		}
+	} else if b.useCausalMask && b.kvCacheShape.Ok() {
 		causalMask := b.buildCausalMask()
 		if mask == nil {
 			mask = causalMask
@@ -782,16 +937,8 @@ func (b *MultiHeadAttentionBuilder) buildCausalMask() (mask *Node) {
 	mask = ExpandDims(mask, 2)                                   // [1, queryLen, 1, keyLen]
 	mask = BroadcastToDims(mask, b.attentionShape.Dimensions...) // Broadcast to target dimensions
 
-	// Combine with cache validity mask if using cache
-	if b.kvCacheShape.Ok() {
-		cacheValidMask := createKVCacheAttentionMask(b.g, b.kvCacheShape, b.position, queryLen, keyLen)
-		// cacheValidMask shape: [batch, 1, queryLen, keyLen]
-		// Remove the '1' dimension at position 1 and add numHeads dimension at position 2
-		cacheValidMask = Squeeze(cacheValidMask, 1)    // [batch, queryLen, keyLen]
-		cacheValidMask = ExpandDims(cacheValidMask, 2) // [batch, queryLen, 1, keyLen]
-		cacheValidMask = BroadcastToDims(cacheValidMask, b.attentionShape.Dimensions...)
-		mask = LogicalAnd(mask, cacheValidMask)
-	}
+	// Note: cache validity is already handled by the validMask above (k < actualCacheLen),
+	// so no additional createKVCacheAttentionMask call is needed here.
 
 	return
 }

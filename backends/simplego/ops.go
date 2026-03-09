@@ -71,6 +71,17 @@ func (s *sliceNode) EqualNodeData(other nodeDataComparable) bool {
 		slices.Equal(s.strides, o.strides)
 }
 
+// dynamicSliceNode is attached to the Node.data field for DynamicSlice.
+type dynamicSliceNode struct {
+	sliceDims []int
+}
+
+// EqualNodeData implements nodeDataComparable for dynamicSliceNode.
+func (d *dynamicSliceNode) EqualNodeData(other nodeDataComparable) bool {
+	o := other.(*dynamicSliceNode)
+	return slices.Equal(d.sliceDims, o.sliceDims)
+}
+
 type argMinMaxNode struct {
 	axis  int
 	isMin bool

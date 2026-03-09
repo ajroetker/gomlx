@@ -175,14 +175,16 @@ func isPackedSubByteDType(dtype dtypes.DType) bool {
 
 // packedLen returns the number of bytes needed to store `logicalSize` elements
 // of the given dtype. For sub-byte types (Int4, Uint4, Int2, Uint2), multiple
-// values are packed per byte. For standard types, returns logicalSize unchanged.
+// values are packed per byte in []uint8 storage. For standard types (including
+// Bool, which uses []bool with one value per element), returns logicalSize unchanged.
 func packedLen(dtype dtypes.DType, logicalSize int) int {
-	bitsPerElem := dtype.Bits()
-	if bitsPerElem >= 8 {
+	switch dtype {
+	case dtypes.Int4, dtypes.Uint4, dtypes.Int2, dtypes.Uint2:
+		valuesPerByte := 8 / dtype.Bits()
+		return (logicalSize + valuesPerByte - 1) / valuesPerByte
+	default:
 		return logicalSize
 	}
-	valuesPerByte := 8 / bitsPerElem
-	return (logicalSize + valuesPerByte - 1) / valuesPerByte
 }
 
 // makeSliceForDType creates a slice of the appropriate type for the given dtype and length.
@@ -270,7 +272,7 @@ func (b *Backend) getBuffer(dtype dtypes.DType, length int) (*Buffer, error) {
 	// Also reset the 1D shape to match the actual length (the pool's New function
 	// creates shapes at the bucketed size).
 	if length > 0 {
-		buf.flat = subSliceFlat(buf.flat, length)
+		buf.flat = subSliceFlat(buf.flat, packedLen(dtype, length))
 	}
 	buf.shape = shapes.Make(dtype, length)
 	// buf.randomize() // Useful to find where zero-initialized is needed but missing.

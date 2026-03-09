@@ -539,7 +539,7 @@ func BroadcastToShape(x *Node, shape shapes.Shape) *Node {
 // See also the equivalent BroadcastToShape.
 func BroadcastToDims(x *Node, dimensions ...int) *Node {
 	_ = validateBuildingGraphFromInputs(x)
-	shape := shapes.Make(x.DType(), dimensions...)
+	shape := shapes.Shape{DType: x.DType(), Dimensions: slices.Clone(dimensions)}
 	if x.Shape().IsScalar() && shape.IsScalar() {
 		// Assume nothing to do.
 		return x
@@ -594,31 +594,33 @@ func Where(condition, onTrue, onFalse *Node) *Node {
 			onTrue.Shape(), onFalse.Shape())
 	}
 
-	// Broadcasting of condition when it's a prefix to one of the operands:
+	// Broadcasting of condition to the output shape.
+	// Supports numpy-style broadcasting: condition dimensions must be 1 or match the output.
+	// Also supports prefix broadcasting: condition can have fewer dimensions (trailing axes are added).
 	if !condition.IsScalar() {
 		if condition.Rank() > outputShape.Rank() {
 			exceptions.Panicf(
-				"Where() requires the condition shape (%s) to be a prefix (or equal) to the output shape (%s), onTrue is %s and onFalse is %s",
-				condition.Shape(),
-				outputShape,
-				onTrue.Shape(),
-				onFalse.Shape(),
+				"Where() condition rank (%d) exceeds output rank (%d): condition=%s, onTrue=%s, onFalse=%s",
+				condition.Rank(), outputShape.Rank(),
+				condition.Shape(), onTrue.Shape(), onFalse.Shape(),
 			)
 		}
 		for axis, dim := range condition.Shape().Dimensions {
-			if outputShape.Dimensions[axis] != dim {
+			outDim := outputShape.Dimensions[axis]
+			if dim != 1 && dim != shapes.DynamicDim && outDim != shapes.DynamicDim && dim != outDim {
 				exceptions.Panicf(
-					"Where() requires the condition shape to be a prefix (or equal) to the output shape, but condition is %s and output shape is %s",
-					condition.Shape(),
-					outputShape,
+					"Where() condition shape %s is not broadcastable to output shape %s (axis %d: %d vs %d)",
+					condition.Shape(), outputShape, axis, dim, outDim,
 				)
 			}
 		}
 		if condition.Rank() != outputShape.Rank() {
-			// Broadcast condition.
+			// Add trailing axes for prefix broadcasting.
 			extraAxes := outputShape.Rank() - condition.Rank()
 			condition = InsertAxes(condition, xslices.SliceWithValue(extraAxes, -1)...)
-			condition = BroadcastToDims(condition, outputShape.Dimensions...)
+		}
+		if !condition.Shape().Equal(outputShape) {
+			condition = BroadcastToShape(condition, outputShape)
 		}
 	}
 
