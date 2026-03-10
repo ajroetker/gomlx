@@ -100,6 +100,19 @@ func QuantizedDenseParams(node *Node) (scheme backends.QuantizationScheme, block
 	return data.scheme, data.blockSize, data.activation, data.hasZeroPoint
 }
 
+// QuantizedDenseGGMLParams extracts the GGML-specific parameters from a FusedQuantizedDense node.
+// Only valid when scheme == QuantGGML.
+func QuantizedDenseGGMLParams(node *Node) (ggmlType backends.GGMLQuantType, N, K int, activation backends.ActivationType, hasBias bool) {
+	data := node.data.(*nodeFusedQuantizedDense)
+	return data.ggmlType, data.ggmlN, data.ggmlK, data.activation, data.hasBias
+}
+
+// QuantizedGatherGGMLParams extracts the parameters from a FusedQuantizedGather node.
+func QuantizedGatherGGMLParams(node *Node) (ggmlType backends.GGMLQuantType, K int) {
+	data := node.data.(*nodeFusedQuantizedGather)
+	return data.ggmlType, data.ggmlK
+}
+
 // TransposeBuffer transposes a buffer according to the given axis permutation.
 // Used by the highway subpackage for transposing BSHD masks to BHSD layout.
 func TransposeBuffer(backend *Backend, buf *Buffer, permutations []int) *Buffer {

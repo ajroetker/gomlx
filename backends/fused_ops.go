@@ -90,21 +90,27 @@ var NF4LookupTable = [16]float32{
 	0.44070982933044434, 0.5626170039176941, 0.7229568362236023, 1.0,
 }
 
+// IQ4NLLookupTable contains the 16 fixed IQ4_NL non-linear dequantization values.
+// These map 4-bit nibble indices to float32 values using a non-uniform quantization grid.
+// Values from llama.cpp's iq4nl.
+var IQ4NLLookupTable = [16]float32{
+	-127, -104, -83, -65, -49, -35, -22, -10,
+	1, 13, 25, 38, 53, 69, 89, 113,
+}
+
 // GGMLQuantType identifies the specific GGML block quantization format.
-// The zero value (GGMLQuantTypeInvalid) is reserved as a sentinel so that
-// default-initialized Quantization structs do not silently appear as Q4_0.
+// Enum values are aligned with go-highway's gguf.QuantType for future integration.
 type GGMLQuantType int
 
 const (
-	GGMLQuantTypeInvalid GGMLQuantType = iota // zero value sentinel; not a valid format
-	GGMLQ4_0                                  // 18 bytes/block, 32 values
-	GGMLQ8_0                                  // 34 bytes/block, 32 values
-	GGMLIQ4NL                                 // 18 bytes/block, 32 values (non-linear lookup)
-	GGMLQ2_K                                  // 84 bytes/block, 256 values
-	GGMLQ3_K                                  // 110 bytes/block, 256 values
-	GGMLQ4_K                                  // 144 bytes/block, 256 values
-	GGMLQ5_K                                  // 176 bytes/block, 256 values
-	GGMLQ6_K                                  // 210 bytes/block, 256 values
+	GGMLQ4_0  GGMLQuantType = iota // 18 bytes/block, 32 values
+	GGMLQ8_0                       // 34 bytes/block, 32 values
+	GGMLIQ4NL                      // 18 bytes/block, 32 values (non-linear lookup)
+	GGMLQ2_K                       // 84 bytes/block, 256 values
+	GGMLQ3_K                       // 110 bytes/block, 256 values
+	GGMLQ4_K                       // 144 bytes/block, 256 values
+	GGMLQ5_K                       // 176 bytes/block, 256 values
+	GGMLQ6_K                       // 210 bytes/block, 256 values
 )
 
 // ValuesPerBlock returns the number of float32 values represented by one block.

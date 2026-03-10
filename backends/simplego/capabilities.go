@@ -151,9 +151,9 @@ var Capabilities = backends.Capabilities{
 		// backends.OpTypeSelectAndScatterMax: true,
 		// backends.OpTypeSelectAndScatterMin: true,
 		// backends.OpTypeSelectAndScatterSum: true,
-		// backends.OpTypeShiftLeft: true,
-		// backends.OpTypeShiftRightArithmetic: true,
-		// backends.OpTypeShiftRightLogical: true,
+		backends.OpTypeShiftLeft:            true,
+		backends.OpTypeShiftRightArithmetic: true,
+		backends.OpTypeShiftRightLogical:    true,
 		backends.OpTypeBitcast: true,
 
 		// Lower priority ops:

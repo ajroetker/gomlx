@@ -6,6 +6,7 @@ import (
 	"math"
 
 	"github.com/ajroetker/go-highway/hwy/contrib/activation"
+	"github.com/ajroetker/go-highway/hwy/contrib/gguf"
 	"github.com/ajroetker/go-highway/hwy/contrib/matmul"
 	"github.com/ajroetker/go-highway/hwy/contrib/nn"
 	"github.com/gomlx/gomlx/backends"
@@ -22,6 +23,7 @@ func init() {
 	simplego.SetNodeExecutor(backends.OpTypeFusedDense, simplego.RegisterPriorityArch, execDenseActivationHighway)
 	simplego.SetNodeExecutor(backends.OpTypeFusedScaledDotProductAttention, simplego.RegisterPriorityArch, execSDPAHighway)
 	simplego.SetNodeExecutor(backends.OpTypeFusedQuantizedDense, simplego.RegisterPriorityArch, execQuantizedDenseHighway)
+	simplego.SetNodeExecutor(backends.OpTypeFusedQuantizedGather, simplego.RegisterPriorityArch, execQuantizedGatherHighway)
 	simplego.SetMultiOutputsNodeExecutor(backends.OpTypeFusedAttentionQKVProjection, simplego.RegisterPriorityArch, execQKVProjectionHighway)
 }
 
@@ -547,8 +549,62 @@ func backendToMatmulActivation(act backends.ActivationType) (matmul.ActivationTy
 }
 
 // execQuantizedDenseHighway implements SIMD-accelerated fused quantized dense.
-// inputs layout: [x, weights, scales, zeroPoints?, bias?]
+// inputs layout: [x, weights, scales, zeroPoints?, bias?] (Linear/NF4)
+//
+//	[x, weights, bias?] (GGML)
 func execQuantizedDenseHighway(backend *simplego.Backend, node *simplego.Node, inputs []*simplego.Buffer, inputsOwned []bool) (*simplego.Buffer, error) {
+	scheme, _, _, _ := simplego.QuantizedDenseParams(node)
+
+	// GGML has a different input layout (no scales/zeroPoints), handle separately.
+	if scheme == backends.QuantGGML {
+		return execQuantizedDenseGGMLHighway(backend, node, inputs)
+	}
+
+	return execQuantizedDenseScaledHighway(backend, node, inputs)
+}
+
+// execQuantizedDenseGGMLHighway handles GGML quantized dense via go-highway's
+// fused quantize+vec_dot matmul. Weights stay in native GGML block format;
+// activations are quantized to Q8_0/Q8_K on the fly.
+// inputs layout: [x, weights, bias?]
+func execQuantizedDenseGGMLHighway(backend *simplego.Backend, node *simplego.Node, inputs []*simplego.Buffer) (*simplego.Buffer, error) {
+	ggmlType, N, K, act, hasBias := simplego.QuantizedDenseGGMLParams(node)
+	qt, err := backendToGGUFQuantType(ggmlType)
+	if err != nil {
+		return nil, err
+	}
+
+	x := inputs[0]
+	w := inputs[1]
+	if x.DType() != dtypes.Float32 {
+		return nil, errors.Errorf("highway QuantizedDense(GGML): only float32 input supported, got %s", x.DType())
+	}
+
+	xData := x.Flat().([]float32)
+	weightsData := w.Flat().([]uint8)
+	M := x.Shape().Size() / K
+	output := simplego.FusedOpOutput(backend, node)
+	outData := output.Flat().([]float32)
+
+	gguf.ParallelGGUFMatMul(hwyPool, xData, weightsData, outData, M, K, N, qt)
+
+	if hasBias {
+		biasData := inputs[2].Flat().([]float32)
+		for m := range M {
+			row := outData[m*N : (m+1)*N]
+			for n := range N {
+				row[n] += biasData[n]
+			}
+		}
+	}
+
+	simplego.ApplyActivationFloat32(backend, outData, act)
+	return output, nil
+}
+
+// execQuantizedDenseScaledHighway handles Linear and NF4 quantized dense.
+// inputs layout: [x, weights, scales, zeroPoints?, bias?]
+func execQuantizedDenseScaledHighway(backend *simplego.Backend, node *simplego.Node, inputs []*simplego.Buffer) (*simplego.Buffer, error) {
 	scheme, blockSize, act, hasZeroPoint := simplego.QuantizedDenseParams(node)
 
 	x := inputs[0]
@@ -640,6 +696,104 @@ func packNibbles(unpacked []uint8) []uint8 {
 		packed[n/2] = unpacked[n-1] & 0x0F
 	}
 	return packed
+}
+
+// backendToGGUFQuantType maps backends.GGMLQuantType to gguf.QuantType.
+func backendToGGUFQuantType(t backends.GGMLQuantType) (gguf.QuantType, error) {
+	switch t {
+	case backends.GGMLQ4_0:
+		return gguf.TypeQ4_0, nil
+	case backends.GGMLQ8_0:
+		return gguf.TypeQ8_0, nil
+	case backends.GGMLIQ4NL:
+		return gguf.TypeIQ4NL, nil
+	case backends.GGMLQ2_K:
+		return gguf.TypeQ2_K, nil
+	case backends.GGMLQ3_K:
+		return gguf.TypeQ3_K, nil
+	case backends.GGMLQ4_K:
+		return gguf.TypeQ4_K, nil
+	case backends.GGMLQ5_K:
+		return gguf.TypeQ5_K, nil
+	case backends.GGMLQ6_K:
+		return gguf.TypeQ6_K, nil
+	default:
+		return gguf.QuantTypeInvalid, errors.Errorf("highway: unsupported GGML quant type %s", t)
+	}
+}
+
+// ggufDequantFunc returns the go-highway dequantization function for the given GGML type.
+func ggufDequantFunc(t backends.GGMLQuantType) (func(data []uint8, output []float32), error) {
+	switch t {
+	case backends.GGMLQ4_0:
+		return gguf.DequantizeQ4_0, nil
+	case backends.GGMLQ8_0:
+		return gguf.DequantizeQ8_0, nil
+	case backends.GGMLIQ4NL:
+		return gguf.DequantizeIQ4NL, nil
+	case backends.GGMLQ2_K:
+		return gguf.DequantizeQ2K, nil
+	case backends.GGMLQ3_K:
+		return gguf.DequantizeQ3K, nil
+	case backends.GGMLQ4_K:
+		return gguf.DequantizeQ4K, nil
+	case backends.GGMLQ5_K:
+		return gguf.DequantizeQ5K, nil
+	case backends.GGMLQ6_K:
+		return gguf.DequantizeQ6K, nil
+	default:
+		return nil, errors.Errorf("highway: unsupported GGML quant type %s for dequantization", t)
+	}
+}
+
+// execQuantizedGatherHighway implements SIMD-accelerated GGML quantized embedding lookup.
+// Dequantizes only the selected rows using go-highway's dispatched dequantization kernels.
+func execQuantizedGatherHighway(backend *simplego.Backend, node *simplego.Node, inputs []*simplego.Buffer, inputsOwned []bool) (*simplego.Buffer, error) {
+	ggmlType, K := simplego.QuantizedGatherGGMLParams(node)
+
+	tableBuf := inputs[0]
+	indicesBuf := inputs[1]
+
+	dequantFn, err := ggufDequantFunc(ggmlType)
+	if err != nil {
+		return nil, err
+	}
+
+	output := simplego.FusedOpOutput(backend, node)
+	tableBytes := tableBuf.Flat().([]uint8)
+	outData := output.Flat().([]float32)
+	bytesPerRow := tableBuf.Shape().Dimensions[1]
+
+	numIndices := indicesBuf.Shape().Size() / indicesBuf.Shape().Dimensions[indicesBuf.Shape().Rank()-1]
+	dequantRow := make([]float32, K)
+
+	switch idxFlat := indicesBuf.Flat().(type) {
+	case []int32:
+		for i := range numIndices {
+			rowIdx := int(idxFlat[i])
+			rowData := tableBytes[rowIdx*bytesPerRow : (rowIdx+1)*bytesPerRow]
+			dequantFn(rowData, dequantRow)
+			copy(outData[i*K:(i+1)*K], dequantRow)
+		}
+	case []int64:
+		for i := range numIndices {
+			rowIdx := int(idxFlat[i])
+			rowData := tableBytes[rowIdx*bytesPerRow : (rowIdx+1)*bytesPerRow]
+			dequantFn(rowData, dequantRow)
+			copy(outData[i*K:(i+1)*K], dequantRow)
+		}
+	case []int:
+		for i := range numIndices {
+			rowIdx := idxFlat[i]
+			rowData := tableBytes[rowIdx*bytesPerRow : (rowIdx+1)*bytesPerRow]
+			dequantFn(rowData, dequantRow)
+			copy(outData[i*K:(i+1)*K], dequantRow)
+		}
+	default:
+		return nil, errors.Errorf("highway QuantizedGather: unsupported indices type %T", indicesBuf.Flat())
+	}
+
+	return output, nil
 }
 
 // execDenseActivationHighway implements SIMD-accelerated dense + activation: y = act(x @ W + b).
