@@ -923,6 +923,8 @@ func execFusedQuantizedDenseGGML(backend *Backend, node *Node, inputs []*Buffer,
 }
 
 // quantizedDenseGGML performs GGML dequant + matmul + bias.
+// Uses quantizedDenseParallel for consistent parallelism with the other quantized paths,
+// including M=1 column tiling for single-token inference.
 func quantizedDenseGGML(backend *Backend, x []float32, weights []uint8, bias, out []float32,
 	M, K, N, bytesPerRow int, ggmlType backends.GGMLQuantType) error {
 
@@ -931,51 +933,23 @@ func quantizedDenseGGML(backend *Backend, x []float32, weights []uint8, bias, ou
 		return err
 	}
 
-	totalWork := M * K * N
-	if backend == nil || !backend.workers.IsEnabled() || totalWork <= minParallelizeChunk {
+	quantizedDenseParallel(backend, M, K, N, func(m, nStart, nEnd int) {
 		dequantRow := make([]float32, K)
-		for n := range N {
+		for n := nStart; n < nEnd; n++ {
 			rowData := weights[n*bytesPerRow : (n+1)*bytesPerRow]
 			dequantFn(rowData, dequantRow)
-			for m := range M {
-				var dot float32
-				xRow := x[m*K:]
-				for k := range K {
-					dot += xRow[k] * dequantRow[k]
-				}
-				outIdx := m*N + n
-				out[outIdx] = dot
-				if bias != nil {
-					out[outIdx] += bias[n]
-				}
+			var dot float32
+			xRow := x[m*K:]
+			for k := range K {
+				dot += xRow[k] * dequantRow[k]
+			}
+			outIdx := m*N + n
+			out[outIdx] = dot
+			if bias != nil {
+				out[outIdx] += bias[n]
 			}
 		}
-	} else {
-		var wg sync.WaitGroup
-		for n := range N {
-			n := n
-			wg.Add(1)
-			backend.workers.WaitToStart(func() {
-				dequantRow := make([]float32, K)
-				rowData := weights[n*bytesPerRow : (n+1)*bytesPerRow]
-				dequantFn(rowData, dequantRow)
-				for m := range M {
-					var dot float32
-					xRow := x[m*K:]
-					for k := range K {
-						dot += xRow[k] * dequantRow[k]
-					}
-					outIdx := m*N + n
-					out[outIdx] = dot
-					if bias != nil {
-						out[outIdx] += bias[n]
-					}
-				}
-				wg.Done()
-			})
-		}
-		wg.Wait()
-	}
+	})
 
 	return nil
 }
@@ -987,12 +961,14 @@ func ggmlDequantFunc(ggmlType backends.GGMLQuantType) (func(data []uint8, output
 		return dequantQ4_0Row, nil
 	case backends.GGMLQ8_0:
 		return dequantQ8_0Row, nil
+	case backends.GGMLIQ4NL:
+		return dequantIQ4NLRow, nil
 	case backends.GGMLQ4_K:
 		return dequantQ4_KRow, nil
 	case backends.GGMLQ6_K:
 		return dequantQ6_KRow, nil
 	default:
-		return nil, errors.Wrapf(backends.ErrNotImplemented, "FusedQuantizedDense(GGML): type %s not yet supported", ggmlType)
+		return nil, errors.Wrapf(backends.ErrNotImplemented, "GGML type %s not yet supported in fused path", ggmlType)
 	}
 }
 
@@ -1000,7 +976,7 @@ func ggmlDequantFunc(ggmlType backends.GGMLQuantType) (func(data []uint8, output
 func ggmlFp16LE(lo, hi uint8) float32 {
 	raw := uint32(lo) | uint32(hi)<<8
 	sign := raw >> 15
-	exp := (raw >> 10) & 0x1F
+	exp := int32((raw >> 10) & 0x1F)
 	mant := raw & 0x3FF
 	if exp == 0 {
 		if mant == 0 {
@@ -1012,13 +988,13 @@ func ggmlFp16LE(lo, hi uint8) float32 {
 			exp--
 		}
 		mant &= 0x3FF
-		exp = uint32(int32(exp) + 127 - 15)
+		exp += 127 - 15
 	} else if exp == 31 {
 		return math.Float32frombits((sign << 31) | 0x7F800000 | (mant << 13))
 	} else {
-		exp = exp + 127 - 15
+		exp += 127 - 15
 	}
-	return math.Float32frombits((sign << 31) | (exp << 23) | (mant << 13))
+	return math.Float32frombits((sign << 31) | (uint32(exp) << 23) | (mant << 13))
 }
 
 // dequantQ8_0Row converts Q8_0 quantized blocks to float32.
@@ -1054,6 +1030,29 @@ func dequantQ4_0Row(data []uint8, output []float32) {
 			output[outOff+i] = d * float32(lo-8)
 			hi := int((qs[i] >> 4) & 0x0F)
 			output[outOff+16+i] = d * float32(hi-8)
+		}
+	}
+}
+
+// dequantIQ4NLRow converts IQ4_NL quantized blocks to float32.
+// Same layout as Q4_0 (2-byte fp16 scale + 16 nibble bytes), but nibble values are
+// indices into the IQ4NLLookupTable (pre-normalization integers) instead of linear (nibble - 8).
+// Final value: output[i] = scale * IQ4NLLookupTable[nibble].
+func dequantIQ4NLRow(data []uint8, output []float32) {
+	const blockSize = 18
+	const qk = 32
+	lut := &backends.IQ4NLLookupTable
+	nblocks := len(data) / blockSize
+	for b := range nblocks {
+		blockData := data[b*blockSize : (b+1)*blockSize]
+		d := ggmlFp16LE(blockData[0], blockData[1])
+		qs := blockData[2:]
+		outOff := b * qk
+		for i := range 16 {
+			lo := qs[i] & 0x0F
+			output[outOff+i] = d * lut[lo]
+			hi := (qs[i] >> 4) & 0x0F
+			output[outOff+16+i] = d * lut[hi]
 		}
 	}
 }
@@ -1173,33 +1172,43 @@ func execFusedQuantizedGather(backend *Backend, node *Node, inputs []*Buffer, _ 
 	numIndices := indicesBuf.shape.Size() / indicesBuf.shape.Dimensions[indicesBuf.shape.Rank()-1]
 	dequantRow := make([]float32, K)
 
-	switch idxFlat := indicesBuf.flat.(type) {
-	case []int32:
-		for i := range numIndices {
-			rowIdx := int(idxFlat[i])
-			rowData := tableBytes[rowIdx*bytesPerRow : (rowIdx+1)*bytesPerRow]
-			dequantFn(rowData, dequantRow)
-			copy(out[i*K:(i+1)*K], dequantRow)
+	indices, err := flatToIntSlice(indicesBuf.flat, numIndices)
+	if err != nil {
+		return nil, errors.Wrapf(err, "FusedQuantizedGather")
+	}
+	vocabSize := tableBuf.shape.Dimensions[0]
+	for i, rowIdx := range indices {
+		if rowIdx < 0 || rowIdx >= vocabSize {
+			return nil, errors.Errorf("FusedQuantizedGather: index %d out of range [0, %d)", rowIdx, vocabSize)
 		}
-	case []int64:
-		for i := range numIndices {
-			rowIdx := int(idxFlat[i])
-			rowData := tableBytes[rowIdx*bytesPerRow : (rowIdx+1)*bytesPerRow]
-			dequantFn(rowData, dequantRow)
-			copy(out[i*K:(i+1)*K], dequantRow)
-		}
-	case []int:
-		for i := range numIndices {
-			rowIdx := idxFlat[i]
-			rowData := tableBytes[rowIdx*bytesPerRow : (rowIdx+1)*bytesPerRow]
-			dequantFn(rowData, dequantRow)
-			copy(out[i*K:(i+1)*K], dequantRow)
-		}
-	default:
-		return nil, errors.Errorf("FusedQuantizedGather: unsupported indices type %T", indicesBuf.flat)
+		rowData := tableBytes[rowIdx*bytesPerRow : (rowIdx+1)*bytesPerRow]
+		dequantFn(rowData, dequantRow)
+		copy(out[i*K:(i+1)*K], dequantRow)
 	}
 
 	return output, nil
+}
+
+// flatToIntSlice converts a flat index slice ([]int32, []int64, or []int) to []int.
+func flatToIntSlice(flat any, n int) ([]int, error) {
+	switch s := flat.(type) {
+	case []int32:
+		out := make([]int, n)
+		for i := range n {
+			out[i] = int(s[i])
+		}
+		return out, nil
+	case []int64:
+		out := make([]int, n)
+		for i := range n {
+			out[i] = int(s[i])
+		}
+		return out, nil
+	case []int:
+		return s[:n], nil
+	default:
+		return nil, errors.Errorf("unsupported indices type %T", flat)
+	}
 }
 
 // quantizedDenseParallel runs rowFn(m) for each row m in [0, M), parallelizing over M rows

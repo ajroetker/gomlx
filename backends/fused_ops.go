@@ -91,8 +91,9 @@ var NF4LookupTable = [16]float32{
 }
 
 // IQ4NLLookupTable contains the 16 fixed IQ4_NL non-linear dequantization values.
-// These map 4-bit nibble indices to float32 values using a non-uniform quantization grid.
-// Values from llama.cpp's iq4nl.
+// These map 4-bit nibble indices to pre-normalization integer values (not final floats).
+// Final dequantized value = per-block scale * IQ4NLLookupTable[nibble].
+// Values from llama.cpp's kvalues_iq4nl.
 var IQ4NLLookupTable = [16]float32{
 	-127, -104, -83, -65, -49, -35, -22, -10,
 	1, 13, 25, 38, 53, 69, 89, 113,
@@ -126,12 +127,10 @@ func (t GGMLQuantType) ValuesPerBlock() int {
 // BytesPerBlock returns the byte size of one quantized block.
 func (t GGMLQuantType) BytesPerBlock() int {
 	switch t {
-	case GGMLQ4_0:
+	case GGMLQ4_0, GGMLIQ4NL:
 		return 18
 	case GGMLQ8_0:
 		return 34
-	case GGMLIQ4NL:
-		return 18
 	case GGMLQ2_K:
 		return 84
 	case GGMLQ3_K:
@@ -329,13 +328,13 @@ type FusedOps interface {
 	//   - table: [vocabSize, bytesPerRow] Uint8 with native GGML block layout.
 	//   - indices: integer tensor with last dimension = 1 (same as Gather convention).
 	//     For embeddings: [batch, seqLen, 1].
-	//   - weightsQuantization: describes how to dequantize the table rows. Must not be nil.
+	//   - tableQuantization: describes how to dequantize the table rows. Must not be nil.
 	//     Only QuantGGML scheme is supported.
 	//
 	// Output: float32 tensor with shape [batch..., K] where K = (bytesPerRow / bytesPerBlock) * valuesPerBlock.
 	//   For embeddings with indices [batch, seqLen, 1]: output is [batch, seqLen, K].
 	FusedQuantizedGather(table, indices Value,
-		weightsQuantization *Quantization) (Value, error)
+		tableQuantization *Quantization) (Value, error)
 
 	// FusedQuantizedDense performs fused dequantization + matmul + optional bias + optional activation.
 	//
