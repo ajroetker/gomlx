@@ -748,6 +748,7 @@ func ggufDequantFunc(t backends.GGMLQuantType) (func(data []uint8, output []floa
 
 // execQuantizedGatherHighway implements SIMD-accelerated GGML quantized embedding lookup.
 // Dequantizes only the selected rows using go-highway's dispatched dequantization kernels.
+// For multiple indices (prompt prefill), rows are dequantized in parallel across workers.
 func execQuantizedGatherHighway(backend *simplego.Backend, node *simplego.Node, inputs []*simplego.Buffer, inputsOwned []bool) (*simplego.Buffer, error) {
 	ggmlType, K := simplego.QuantizedGatherGGMLParams(node)
 
@@ -765,33 +766,23 @@ func execQuantizedGatherHighway(backend *simplego.Backend, node *simplego.Node, 
 	bytesPerRow := tableBuf.Shape().Dimensions[1]
 
 	numIndices := indicesBuf.Shape().Size() / indicesBuf.Shape().Dimensions[indicesBuf.Shape().Rank()-1]
-	dequantRow := make([]float32, K)
 
-	switch idxFlat := indicesBuf.Flat().(type) {
-	case []int32:
-		for i := range numIndices {
-			rowIdx := int(idxFlat[i])
-			rowData := tableBytes[rowIdx*bytesPerRow : (rowIdx+1)*bytesPerRow]
-			dequantFn(rowData, dequantRow)
-			copy(outData[i*K:(i+1)*K], dequantRow)
-		}
-	case []int64:
-		for i := range numIndices {
-			rowIdx := int(idxFlat[i])
-			rowData := tableBytes[rowIdx*bytesPerRow : (rowIdx+1)*bytesPerRow]
-			dequantFn(rowData, dequantRow)
-			copy(outData[i*K:(i+1)*K], dequantRow)
-		}
-	case []int:
-		for i := range numIndices {
-			rowIdx := idxFlat[i]
-			rowData := tableBytes[rowIdx*bytesPerRow : (rowIdx+1)*bytesPerRow]
-			dequantFn(rowData, dequantRow)
-			copy(outData[i*K:(i+1)*K], dequantRow)
-		}
-	default:
-		return nil, errors.Errorf("highway QuantizedGather: unsupported indices type %T", indicesBuf.Flat())
+	indices, err := simplego.FlatToIntSlice(indicesBuf.Flat(), numIndices)
+	if err != nil {
+		return nil, errors.Wrapf(err, "highway QuantizedGather")
 	}
+
+	// Parallel dequantization: each worker gets its own dequantRow buffer
+	// and writes directly to its portion of the output.
+	hwyPool.ParallelFor(numIndices, func(start, end int) {
+		dequantRow := make([]float32, K)
+		for i := start; i < end; i++ {
+			rowIdx := indices[i]
+			rowData := tableBytes[rowIdx*bytesPerRow : (rowIdx+1)*bytesPerRow]
+			dequantFn(rowData, dequantRow)
+			copy(outData[i*K:(i+1)*K], dequantRow)
+		}
+	})
 
 	return output, nil
 }

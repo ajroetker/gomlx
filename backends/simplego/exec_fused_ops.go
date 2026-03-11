@@ -1172,7 +1172,7 @@ func execFusedQuantizedGather(backend *Backend, node *Node, inputs []*Buffer, _ 
 	numIndices := indicesBuf.shape.Size() / indicesBuf.shape.Dimensions[indicesBuf.shape.Rank()-1]
 	dequantRow := make([]float32, K)
 
-	indices, err := flatToIntSlice(indicesBuf.flat, numIndices)
+	indices, err := FlatToIntSlice(indicesBuf.flat, numIndices)
 	if err != nil {
 		return nil, errors.Wrapf(err, "FusedQuantizedGather")
 	}
@@ -1189,8 +1189,8 @@ func execFusedQuantizedGather(backend *Backend, node *Node, inputs []*Buffer, _ 
 	return output, nil
 }
 
-// flatToIntSlice converts a flat index slice ([]int32, []int64, or []int) to []int.
-func flatToIntSlice(flat any, n int) ([]int, error) {
+// FlatToIntSlice converts a flat index slice ([]int32, []int64, or []int) to []int.
+func FlatToIntSlice(flat any, n int) ([]int, error) {
 	switch s := flat.(type) {
 	case []int32:
 		out := make([]int, n)
