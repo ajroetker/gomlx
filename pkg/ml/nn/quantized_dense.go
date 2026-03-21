@@ -41,9 +41,8 @@ func QuantizedDense(x, weights *Node, quant *Quantization, bias *Node,
 
 	backendAct := act.ToBackend()
 
-	// GGML weights: types with a decomposed graph-level fallback (Q4_0, Q8_0, IQ4_NL)
-	// work on any backend (including XLA). K-quant types (Q4_K, Q6_K, etc.) require
-	// a backend with a fused executor (e.g. simplego); other backends will panic here.
+	// GGML weights: types with a decomposed graph-level fallback (Q4_0, Q8_0, IQ4_NL,
+	// Q4_K, Q6_K) work on any backend (including XLA) via InternalFusedOpCaller.
 	if quant.Scheme == backends.QuantGGML {
 		if ggml.CanDecompose(quant.GGMLType) {
 			return InternalFusedOpCaller(
