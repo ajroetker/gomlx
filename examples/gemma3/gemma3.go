@@ -40,6 +40,7 @@ import (
 	"github.com/ajroetker/huggingface-gomlx/kvcache"
 	"github.com/ajroetker/huggingface-gomlx/serving"
 	"github.com/gomlx/onnx-gomlx/onnx"
+	onnxparser "github.com/gomlx/onnx-gomlx/onnx/parser"
 	"k8s.io/klog/v2"
 
 	_ "github.com/gomlx/gomlx/backends/default"
@@ -117,7 +118,7 @@ func main() {
 	}
 
 	// Load ONNX model.
-	model, err := onnx.ReadFile(onnxPath)
+	model, err := onnxparser.ParseFile(onnxPath)
 	if err != nil {
 		klog.Fatalf("Failed to load ONNX model: %+v", err)
 	}
@@ -513,10 +514,10 @@ type kvStructure struct {
 	outputKeyIndices []int
 	// outputValueIndices are indices into the model's output list for the present value tensors.
 	outputValueIndices []int
-	logitsIndex        int        // index of logits in model.Outputs()
-	kvHeads            int        // number of KV attention heads
-	headDim            int        // head dimension
-	kvDType            dtypes.DType // dtype for KV cache (e.g. Float32 or Float16)
+	logitsIndex        int          // index of logits in model.Outputs()
+	kvHeads            int          // number of KV attention heads
+	headDim            int          // head dimension
+	kvDType            dtypes.DType // DType for KV tensors
 }
 
 // hasOutputs returns true if the model has KV cache outputs (present_key_values).
@@ -526,7 +527,7 @@ func (kv *kvStructure) hasOutputs() bool {
 
 // parseKVStructure inspects the ONNX model's inputs and outputs to identify
 // the KV cache layout: layer count, input/output names, and shapes.
-func parseKVStructure(model *onnx.Model) *kvStructure {
+func parseKVStructure(model onnx.Model) *kvStructure {
 	inputNames, inputShapes := model.Inputs()
 	outputNames, _ := model.Outputs()
 

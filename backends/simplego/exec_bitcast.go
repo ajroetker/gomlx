@@ -27,11 +27,6 @@ func execBitcast(backend *Backend, node *Node, inputs []*Buffer, inputsOwned []b
 	srcDType := src.shape.DType
 	sameBitWidth := srcDType.Bits() == targetDType.Bits()
 
-	// If owned, reuse the buffer directly. For same-bit-width types we also
-	// require matching Go storage types (e.g. int8 vs uint8) since downstream
-	// code type-asserts the flat slice. For different-bit-width types the raw
-	// bytes stay as-is and downstream code (ConvertDType, FusedQuantizedDense)
-	// handles both slice types via type-switch.
 	// Reuse owned buffer only when the flat slice's Go element type is compatible
 	// with downstream operations on the target dtype. For same-bit-width types
 	// with matching Go types this is trivially true. For different-bit-width types
@@ -64,6 +59,14 @@ func execBitcast(backend *Backend, node *Node, inputs []*Buffer, inputsOwned []b
 	if err != nil {
 		return nil, err
 	}
-	copy(output.mutableBytes(), src.mutableBytes())
+	outputBytes, err := output.mutableBytes()
+	if err != nil {
+		return nil, err
+	}
+	srcBytes, err := src.mutableBytes()
+	if err != nil {
+		return nil, err
+	}
+	copy(outputBytes, srcBytes)
 	return output, nil
 }
