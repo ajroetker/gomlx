@@ -3,7 +3,7 @@ module github.com/gomlx/gomlx/examples/gemma3n
 go 1.26
 
 require (
-	github.com/ajroetker/huggingface-gomlx v0.0.0
+	github.com/gomlx/gollmx v0.0.0
 	github.com/gomlx/go-huggingface v0.3.2-0.20260125064416-b0f56ca7fbef
 	github.com/gomlx/gomlx v0.26.1-0.20260220075116-8da82ca8aaad
 	github.com/gomlx/onnx-gomlx v0.3.5-0.20260222061411-0ce0c531c49d
@@ -30,6 +30,6 @@ require (
 )
 
 replace (
-	github.com/ajroetker/huggingface-gomlx => ../../../huggingface-gomlx
+	github.com/gomlx/gollmx => ../../../gollmx
 	github.com/gomlx/gomlx => ../..
 )
