@@ -22,7 +22,11 @@ func TestConvertPackedInt4ToInt8(t *testing.T) {
 	dstShape := shapes.Make(dtypes.Int8, 4)
 	dstBuf := &Buffer{shape: dstShape, flat: make([]int8, 4), inUse: true}
 
-	convertFn := convertDTypePairMap.Get(dtypes.Int4, dtypes.Int8).(convertFnType)
+	tmpAny, tmpErr := convertDTypePairMap.Get(dtypes.Int4, dtypes.Int8)
+	if tmpErr != nil {
+		panic(tmpErr)
+	}
+	convertFn := tmpAny.(convertFnType)
 	convertFn(srcBuf, dstBuf)
 
 	result := dstBuf.flat.([]int8)
@@ -43,7 +47,11 @@ func TestConvertPackedUint4ToUint8(t *testing.T) {
 	dstShape := shapes.Make(dtypes.Uint8, 4)
 	dstBuf := &Buffer{shape: dstShape, flat: make([]uint8, 4), inUse: true}
 
-	convertFn := convertDTypePairMap.Get(dtypes.Uint4, dtypes.Uint8).(convertFnType)
+	tmpAny, tmpErr := convertDTypePairMap.Get(dtypes.Uint4, dtypes.Uint8)
+	if tmpErr != nil {
+		panic(tmpErr)
+	}
+	convertFn := tmpAny.(convertFnType)
 	convertFn(srcBuf, dstBuf)
 
 	result := dstBuf.flat.([]uint8)
@@ -62,7 +70,11 @@ func TestConvertPackedInt4ToFloat32(t *testing.T) {
 	dstShape := shapes.Make(dtypes.Float32, 4)
 	dstBuf := &Buffer{shape: dstShape, flat: make([]float32, 4), inUse: true}
 
-	convertFn := convertDTypePairMap.Get(dtypes.Int4, dtypes.Float32).(convertFnType)
+	tmpAny, tmpErr := convertDTypePairMap.Get(dtypes.Int4, dtypes.Float32)
+	if tmpErr != nil {
+		panic(tmpErr)
+	}
+	convertFn := tmpAny.(convertFnType)
 	convertFn(srcBuf, dstBuf)
 
 	result := dstBuf.flat.([]float32)
@@ -70,6 +82,54 @@ func TestConvertPackedInt4ToFloat32(t *testing.T) {
 	assert.Equal(t, float32(-1), result[1])
 	assert.Equal(t, float32(7), result[2])
 	assert.Equal(t, float32(-8), result[3])
+}
+
+func TestConvertPackedInt2ToInt8(t *testing.T) {
+	// Packed Int2 → Int8: unpacks 2-bit values with sign extension.
+	// Byte 0b11_10_01_00 = 0xE4: values 0, 1, -2, -1.
+	srcData := []byte{0xE4}
+	srcShape := shapes.Make(dtypes.Int2, 4) // 4 Int2 elements packed in 1 byte
+	srcBuf := &Buffer{shape: srcShape, flat: srcData, inUse: true}
+
+	dstShape := shapes.Make(dtypes.Int8, 4)
+	dstBuf := &Buffer{shape: dstShape, flat: make([]int8, 4), inUse: true}
+
+	tmpAny, tmpErr := convertDTypePairMap.Get(dtypes.Int2, dtypes.Int8)
+	if tmpErr != nil {
+		panic(tmpErr)
+	}
+	convertFn := tmpAny.(convertFnType)
+	convertFn(srcBuf, dstBuf)
+
+	result := dstBuf.flat.([]int8)
+	assert.Equal(t, int8(0), result[0])
+	assert.Equal(t, int8(1), result[1])
+	assert.Equal(t, int8(-2), result[2])
+	assert.Equal(t, int8(-1), result[3])
+}
+
+func TestConvertPackedUint2ToUint8(t *testing.T) {
+	// Packed Uint2 → Uint8: unpacks 2-bit values (no sign extension).
+	// Byte 0b11_10_01_00 = 0xE4: values 0, 1, 2, 3.
+	srcData := []byte{0xE4}
+	srcShape := shapes.Make(dtypes.Uint2, 4) // 4 Uint2 elements packed in 1 byte
+	srcBuf := &Buffer{shape: srcShape, flat: srcData, inUse: true}
+
+	dstShape := shapes.Make(dtypes.Uint8, 4)
+	dstBuf := &Buffer{shape: dstShape, flat: make([]uint8, 4), inUse: true}
+
+	tmpAny, tmpErr := convertDTypePairMap.Get(dtypes.Uint2, dtypes.Uint8)
+	if tmpErr != nil {
+		panic(tmpErr)
+	}
+	convertFn := tmpAny.(convertFnType)
+	convertFn(srcBuf, dstBuf)
+
+	result := dstBuf.flat.([]uint8)
+	assert.Equal(t, uint8(0), result[0])
+	assert.Equal(t, uint8(1), result[1])
+	assert.Equal(t, uint8(2), result[2])
+	assert.Equal(t, uint8(3), result[3])
 }
 
 func TestExecSpecialOps_ConvertDType(t *testing.T) {

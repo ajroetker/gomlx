@@ -33,7 +33,8 @@ var (
 	methodsNotExported = sets.MakeWith(
 		"AllReduce", "ArgMinMax", "Broadcast", "BroadcastInDim",
 		"BatchNormForInference", "BatchNormForTraining", "BatchNormGradient",
-		"Concatenate", "ConvertDType", "ConvGeneral", "DotGeneral", "FFT", "Gather", "Iota",
+		"Ceil", "Concatenate", "ConvertDType", "ConvGeneral", "DotGeneral",
+		"FFT", "Floor", "Gather", "Iota",
 		"ReduceMax", "ReduceMin", "ReduceProduct", "ReduceSum", "ReduceWindow",
 
 		// Reduce of logical/bitwise operators:
@@ -52,12 +53,12 @@ var (
 		// Fused ops: exported wrappers with "Internal:" comments are hand-written in fused_ops.go.
 		"FusedDense", "FusedGelu", "FusedLayerNorm", "FusedSoftmax",
 		"FusedScaledDotProductAttention", "FusedAttentionQKVProjection",
-		"FusedQuantizedDense")
+		"FusedQuantizedDense", "QuantizedEmbeddingLookup")
 
 	// methodsNotGenerated get a NodeType but no auto-generated wrapper
 	// (hand-written implementations).
 	methodsNotGenerated = sets.MakeWith(
-		"Constant", "Parameter", "FusedQuantizedDense")
+		"Constant", "Parameter", "FusedQuantizedDense", "QuantizedEmbeddingLookup")
 
 	// nillableParams lists Value parameters that can be nil (passed as *Node).
 	// Key format: "MethodName.paramName"

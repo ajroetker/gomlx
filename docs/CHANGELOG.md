@@ -2,6 +2,81 @@
 
 # Next
 
+- Package `ml/activations`
+  - Added `HardSigmoid` activation.
+  - Modified the parametrized activations to be suffixed with `With`: `LeakyReluWith`, `HardSigmoidWith`, `HardSwishWith`.
+- Package `tensors`
+  - Improving support for sub-byte data types (`Int4`, `Int2`, `Uint4`, `Uint2`)
+
+# 0.27.2: DotGeneral with AccumulatorDType; Transformer architecture parameter; 
+
+### Core:
+- Package `graph`:
+  - `DotGeneral` passing `AccumulatorDType` and `OutputDType` to the backend (instead of assuming it doesn't implement and
+    converting it). Also, by default, half-precision floats use float32 as accumulator.
+    - For the `xla` backend: added an "hacky" dependency from the variable (weights) to the lhs operand of the `DotGeneral`
+      operation: because XLA CPU creates a temporary re-layout of the weights, this dependency ensures that only one temporary
+      buffer is allocated at a time, along the layers of a model (in a 22Gb model with 48 layers, it saved 48Gb! in temporary memory)
+      
+- Package `ml/model/transformer`: 
+  - Added architecture parameter ("standard" or "gemma" values).
+  - Activation passed an `activations.Type` values (instead of string) -- but conversion from string as a context hyperparameters still works.
+  - Added `WithTransposedWeights()` and `WithCausalMask()` options.
+  - Simplified code.
+- Package `ml/layers`
+  - Added constants to normalization types.
+
+### Backends:
+- Backend `xla`:
+  - Updated dependency to `github.com/gomlx/go-xla` to v0.2.2: with a fix to NVIDIA CUDA drivers path.
+  - DotGeneral with unsupported accumulation dtypes (only float32 is supported): it automatically converts the
+   input dtype to the accumulation dtype first.
+  - Added executable memory consumption logging if passing `-vmodule=executable=1`.
+  - Added `OptimizationBarrier` operation. Not exposed in `graph` though.
+  - Added "hack" dependency on the weights of a DotGeneral operation to the lhs operand of the DotGeneral operation,
+    to hugely decrease temporary memory usage. See issue in https://github.com/openxla/stablehlo/issues/2923
+    
+- Backend `simplego` ("go"):
+  - DotGeneral with accumulation dtypes: it automatically converts the input dtype to the accumulation dtype first.
+    (With the exception of half-precision types, which use float32 as accumulator by default).
+
+# v0.27.1: Minor fixes and updates; ONNX-GoMLX examples now use v0.4.1.
+
+- Package `backends`:
+  - Added `QuantGGML` quantization scheme with `GGMLQuantType` enum for native GGML block formats
+    (Q4_0, Q8_0, IQ4_NL, Q4_K, Q6_K).
+  - Added `IQ4NLLookupTable` for IQ4_NL non-linear dequantization.
+  - Added `QuantizedEmbeddingLookup` to `FusedOps` interface for quantized embedding lookups.
+  - Added `ShiftLeft`, `ShiftRightArithmetic`, `ShiftRightLogical` operations.
+
+- Package `examples/...`:
+  - Updated `gemma3`, `mxbai-rerank` and `bert-base-ner` to use the new `onnx-gomlx` v0.4.1 API, bumped dependency.
+
+- Package `graph`:
+  - `Floor` and `Ceil` operations now are identity for integer dtypes.
+  - Added `BackendQuantizedEmbeddingLookup` graph-level op.
+  - Added `LogicalShiftLeft`, `LogicalShiftRight` ops for sub-byte unpacking.
+
+- Package `nn`:
+  - Added `QuantizedGather` layer for quantized embedding lookups with automatic fallback.
+
+- Package `simplego`:
+  - Removed panics during execution: return errors instead.
+  - Fixed missing annotation/stacktrace on not-implemented errors.
+  - Implemented `Pad()` operation (and add some more tests in `graph.TestPad`).
+  - Added `FusedQuantizedDense` support for GGML-quantized weights (Q4_0, Q8_0, IQ4_NL, Q4_K, Q6_K).
+  - Added `QuantizedEmbeddingLookup` for quantized embedding lookups with on-the-fly dequantization.
+  - Added shift operation executors.
+  - Fixed `execBitcast` buffer reuse for cross-bit-width types (e.g. Uint8 → Float16). See #374.
+
+- Package `ggml`:
+  - Added `dense.go`, `dequant.go`, `gather.go` for GGML model weight handling.
+
+- Package `xla`:
+  - Changed `TF_CPP_MIN_LOG_LEVEL` to default to 3. See https://github.com/openxla/xla/issues/26466
+
+# v0.27.0: Graph functions; Improved Go backend (fusion ops); Quantization dtypes; more ML layers & fixes
+
 - Package `backends`: major refactoring to add support for functions/closures.
   - Added `backends.Function`, which now holds all the "ops" methods.
   - Added `NewFunction`, `Closure` and `Call`.
@@ -57,11 +132,13 @@
 - Package `ml/layers/activations`: 
   - Added `HardSwish`.
 - Package `examples`:
-  - Separated in its own sub-modules, to separate its dependencies.
+  - Separated in its own sub-module, to separate its dependencies.
   - Added `gpt2`: A simple GPT-2 implementation using the new transformers and decode packages. It downloads the model from HuggingFace.
   - Added `textgen`: a minimal transformer text generation model that can be trained.
-  - Added `gemma3`: A simple Gemma 3 implementation using the new transformers and decode packages. It downloads the model from HuggingFace.
+  - Added `gemma3`: A simple Gemma 3 implementation using the `onnx-gomlx` package to convert the model, and `go-huggingface` to download the model and run the tokenizer.
+  - Added `mxbai-rerank`: A cross-encoder reranking example using the [MixedBread Reranker v1](https://huggingface.co/mixedbread-ai/mxbai-rerank-base-v1). It uses the `onnx-gomlx` package to convert the model, and `go-huggingface` to download the model and run the tokenizer.
   - Added `BERT-base-NER`: A BERT-base model fine-tuned for Named Entity Recognition.
+- Bumped github actions versions to the new "Node24" ones.
 
 # v0.26.0: Using the new github.com/gomlx/go-xla library. Added linux/arm64 and windows/amd64 support for XLA CPU.
 
